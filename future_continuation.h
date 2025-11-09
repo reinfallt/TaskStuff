@@ -165,7 +165,7 @@ namespace Futures
             , _value_set_(false)
         { }
 
-        Promise(Promise && other)
+        Promise(Promise && other) noexcept
             : _state_(other._state_)
             , _future_retrieved_(other._future_retrieved_)
             , _value_set_(other._value_set_)
@@ -175,7 +175,7 @@ namespace Futures
             other._value_set_ = false;
         }
 
-        Promise& operator=(Promise&& other)
+        Promise& operator=(Promise&& other) noexcept
         {
             _clear();
 
