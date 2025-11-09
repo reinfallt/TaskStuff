@@ -143,6 +143,20 @@ namespace Futures
         Promise(Promise const&) = delete;
         Promise& operator=(Promise const&) = delete;
 
+        void _clear()
+        {
+            if (_state_)
+            {
+                if (!_value_set_)
+                {
+                    SetException(FutureError(FutureErrorCode::BrokenPromise, "Promise was broken!"));
+                }
+
+                _state_->_release();
+                _state_ = nullptr;
+            }
+        }
+
     public:
 
         Promise()
@@ -151,14 +165,32 @@ namespace Futures
             , _value_set_(false)
         { }
 
+        Promise(Promise && other)
+            : _state_(other._state_)
+            , _future_retrieved_(other._future_retrieved_)
+            , _value_set_(other._value_set_)
+        {
+            other._state_ = nullptr;
+            other._future_retrieved_ = false;
+            other._value_set_ = false;
+        }
+
+        Promise& operator=(Promise&& other)
+        {
+            _clear();
+
+            _state_ = other._state_;
+            _future_retrieved_ = other._future_retrieved_;
+            _value_set_ = other._value_set_;
+
+            other._state_ = nullptr;
+            other._future_retrieved_ = false;
+            other._value_set_ = false;
+        }
+
         ~Promise()
         {
-            if (!_value_set_ && _state_)
-            {
-                std::unique_lock lck(_state_->_mtx_value_);
-                _state_->_exception_ = std::make_unique<FutureError>(FutureErrorCode::BrokenPromise, "Promise was broken!");
-                _state_->_cv_value_.notify_all();
-            }
+            _clear();
         }
 
         Future GetFuture()
@@ -179,12 +211,41 @@ namespace Futures
             return Future(_state_);
         }
 
-        void SetValue()
+        void SetValue(ValueT value)
         {
             if (_value_set_)
             {
-
+                throw FutureError(FutureErrorCode::PromiseAlreadySatisfied, "Promise value already set!");
             }
+
+            if (!_state_)
+            {
+                throw FutureError(FutureErrorCode::NoState, "Promise has no state!");
+            }
+
+            std::unique_lock lck(_state_->_mtx_value_);
+            _state_->_value_ = std::move(value);
+            _value_set_ = true;
+            _state_->_cv_value_.notify_all();
+        }
+
+        template <typename ExceptionT>
+        void SetException(ExceptionT exception)
+        {
+            if (_value_set_)
+            {
+                throw FutureError(FutureErrorCode::PromiseAlreadySatisfied, "Promise value already set!");
+            }
+
+            if (!_state_)
+            {
+                throw FutureError(FutureErrorCode::NoState, "Promise has no state!");
+            }
+
+            std::unique_lock lck(_state_->_mtx_value_);
+            _state_->_exception_ = std::make_unique<ExceptionT>(std::move(exception));
+            _value_set_ = true;
+            _state_->_cv_value_.notify_all();
         }
     };
 }
