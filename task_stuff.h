@@ -44,10 +44,15 @@ namespace TaskStuff
 
         std::atomic_int _ref_count_ = 1;
 
-        std::mutex                      _mtx_value_;
-        std::condition_variable         _cv_value_;
-        std::optional<ValueT>           _value_;
-        std::unique_ptr<std::exception> _exception_;
+        struct InternalExceptionHolderIfc
+        {
+            virtual void Throw() = 0;
+        };
+
+        std::mutex                                  _mtx_value_;
+        std::condition_variable                     _cv_value_;
+        std::optional<ValueT>                       _value_;
+        std::unique_ptr<InternalExceptionHolderIfc> _exception_;
 
         void _addRef() { ++_ref_count_; }
 
@@ -58,6 +63,25 @@ namespace TaskStuff
                 delete this;
             }
         }
+
+        template <typename ExceptionT>
+        struct InternalExceptionHolder : public InternalExceptionHolderIfc
+        {
+            ExceptionT _internalException;
+
+            InternalExceptionHolder(ExceptionT exception)
+                : _internalException(std::move(exception))
+            {
+            }
+
+            InternalExceptionHolder(InternalExceptionHolder const&) = delete;
+            InternalExceptionHolder& operator=(InternalExceptionHolder const&) = delete;
+
+            void Throw() override
+            {
+                throw _internalException;
+            }
+        };
 
         friend class Future;
         friend class Promise;
@@ -120,7 +144,7 @@ namespace TaskStuff
 
             if (_state_->_exception_)
             {
-                throw *_state_->_exception_;
+                _state_->_exception_->Throw();
             }
 
             ValueT val = std::move(*_state_->_value_);
@@ -243,7 +267,7 @@ namespace TaskStuff
             }
 
             std::unique_lock lck(_state_->_mtx_value_);
-            _state_->_exception_ = std::make_unique<ExceptionT>(std::move(exception));
+            _state_->_exception_ = std::make_unique<PromiseFutureState::InternalExceptionHolder<ExceptionT>>(std::move(exception));
             _value_set_ = true;
             _state_->_cv_value_.notify_all();
         }
