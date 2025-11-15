@@ -4,6 +4,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <functional>
 
 namespace TaskStuff
 {
@@ -53,6 +54,7 @@ namespace TaskStuff
         std::condition_variable                     _cv_value_;
         std::optional<ValueT>                       _value_;
         std::unique_ptr<InternalExceptionHolderIfc> _exception_;
+        std::optional<std::function<void(ValueT)>>  _continuation_;
 
         void _addRef() { ++_ref_count_; }
 
@@ -135,24 +137,62 @@ namespace TaskStuff
                 throw FutureError(FutureErrorCode::NoState, "Future has no state!");
             }
 
-            std::unique_lock lck(_state_->_mtx_value_);
+            ValueT val;
 
-            while (!_state_->_value_.has_value() && !_state_->_exception_)
+            // Scope for lock
             {
-                _state_->_cv_value_.wait(lck);
-            }
+                std::unique_lock lck(_state_->_mtx_value_);
 
-            if (_state_->_exception_)
-            {
-                _state_->_exception_->Throw();
-            }
+                while (!_state_->_value_.has_value() && !_state_->_exception_)
+                {
+                    _state_->_cv_value_.wait(lck);
+                }
 
-            ValueT val = std::move(*_state_->_value_);
+                if (_state_->_exception_)
+                {
+                    _state_->_exception_->Throw();
+                }
+
+                val = std::move(*_state_->_value_);
+            }
 
             _state_->_release();
             _state_ = nullptr;
 
             return val;
+        }
+
+        void Then(std::function<void(ValueT)> fn)
+        {
+            if (!_state_)
+            {
+                throw FutureError(FutureErrorCode::NoState, "Future has no state!");
+            }
+
+            // Scope for lock
+            {
+                std::unique_lock lck(_state_->_mtx_value_);
+
+                if (_state_->_exception_)
+                {
+                    // Not sure this is how we want to handle exceptions when a continuation function is set.
+                    _state_->_exception_->Throw();
+                }
+
+                // If the promise has already been fulfilled,
+                // call the continuation function immediately
+                if (_state_->_value_.has_value())
+                {
+                    fn(std::move(std::move(*_state_->_value_)));
+                }
+                else
+                {
+                    _state_->_continuation_ = std::move(fn);
+                }
+            }
+
+            _state_->_release();
+            _state_ = nullptr;
         }
     };
 
@@ -248,9 +288,17 @@ namespace TaskStuff
             }
 
             std::unique_lock lck(_state_->_mtx_value_);
-            _state_->_value_ = std::move(value);
             _value_set_ = true;
-            _state_->_cv_value_.notify_all();
+
+            if (_state_->_continuation_.has_value())
+            {
+                (*_state_->_continuation_)(std::move(value));
+            }
+            else
+            {
+                _state_->_value_ = std::move(value);
+                _state_->_cv_value_.notify_all();
+            }
         }
 
         template <typename ExceptionT>
@@ -267,9 +315,18 @@ namespace TaskStuff
             }
 
             std::unique_lock lck(_state_->_mtx_value_);
-            _state_->_exception_ = std::make_unique<PromiseFutureState::InternalExceptionHolder<ExceptionT>>(std::move(exception));
             _value_set_ = true;
-            _state_->_cv_value_.notify_all();
+
+            if (_state_->_continuation_.has_value())
+            {
+                // Not sure this is how we want to handle exceptions when a continuation function is set.
+                throw exception;
+            }
+            else
+            {
+                _state_->_exception_ = std::make_unique<PromiseFutureState::InternalExceptionHolder<ExceptionT>>(std::move(exception));
+                _state_->_cv_value_.notify_all();
+            }
         }
     };
 }
