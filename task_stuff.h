@@ -1,10 +1,11 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <functional>
+#include <span>
 
 namespace TaskStuff
 {
@@ -37,8 +38,13 @@ namespace TaskStuff
         }
     };
 
-    struct ValueT {};
+    template <typename ValueT>
+    class Future;
 
+    template <typename ValueT>
+    class Promise;
+
+    template <typename ValueT>
     class PromiseFutureState
     {
     private:
@@ -85,21 +91,22 @@ namespace TaskStuff
             }
         };
 
-        friend class Future;
-        friend class Promise;
+        friend class Future<ValueT>;
+        friend class Promise<ValueT>;
     };
 
+    template <typename ValueT>
     class Future
     {
     private:
 
-        PromiseFutureState* _state_;
+        PromiseFutureState<ValueT>* _state_;
 
-        Future(PromiseFutureState* state)
+        Future(PromiseFutureState<ValueT>* state)
             : _state_(state)
         { }
 
-        friend class Promise;
+        friend class Promise<ValueT>;
 
     public:
 
@@ -119,7 +126,7 @@ namespace TaskStuff
         }
 
         Future(ValueT value) :
-            _state_(new PromiseFutureState())
+            _state_(new PromiseFutureState<ValueT>())
         {
             _state_->_value_ = std::move(value);
         }
@@ -196,11 +203,12 @@ namespace TaskStuff
         }
     };
 
+    template <typename ValueT>
     class Promise
     {
     private:
 
-        PromiseFutureState* _state_;
+        PromiseFutureState<ValueT>* _state_;
         bool _future_retrieved_;
         bool _value_set_;
 
@@ -224,7 +232,7 @@ namespace TaskStuff
     public:
 
         Promise()
-            : _state_(new PromiseFutureState())
+            : _state_(new PromiseFutureState<ValueT>())
             , _future_retrieved_(false)
             , _value_set_(false)
         { }
@@ -257,7 +265,7 @@ namespace TaskStuff
             _clear();
         }
 
-        Future GetFuture()
+        Future<ValueT> GetFuture()
         {
             if (_future_retrieved_)
             {
@@ -272,7 +280,7 @@ namespace TaskStuff
             _future_retrieved_ = true;
             _state_->_addRef();
 
-            return Future(_state_);
+            return Future<ValueT>(_state_);
         }
 
         void SetValue(ValueT value)
@@ -290,11 +298,12 @@ namespace TaskStuff
             std::unique_lock lck(_state_->_mtx_value_);
             _value_set_ = true;
 
+            // If a continuation function is set, call it with the value
             if (_state_->_continuation_.has_value())
             {
                 (*_state_->_continuation_)(std::move(value));
             }
-            else
+            else // Otherwise set the value in the state normally
             {
                 _state_->_value_ = std::move(value);
                 _state_->_cv_value_.notify_all();
@@ -329,4 +338,33 @@ namespace TaskStuff
             }
         }
     };
+
+    template <typename ValueT>
+    Future<std::vector<ValueT>> WhenAll(std::span<Future<ValueT>> futures)
+    {
+        struct WhenAllContext
+        {
+            std::vector<ValueT> values;
+            std::atomic_int countdown;
+            Promise<std::vector<ValueT>> promise_all;
+        };
+        
+        auto whenAllContext = std::make_shared<WhenAllContext>();
+        whenAllContext->values.resize(futures.size());
+        whenAllContext->countdown = futures.size();
+
+        for (size_t i = 0; i < futures.size(); ++i)
+        {
+            futures[i].Then([whenAllContext = whenAllContext, idx = i](ValueT val)
+                {
+                    whenAllContext->values[idx] = std::move(val);
+                    if (0 == --whenAllContext->countdown) // The last underlying future to complete will set the value in the overall promise
+                    {
+                        whenAllContext->promise_all.SetValue(std::move(whenAllContext->values));
+                    }
+                });
+        }
+
+        return whenAllContext->promise_all.GetFuture();
+    }
 }
