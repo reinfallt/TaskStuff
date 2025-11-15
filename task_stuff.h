@@ -5,7 +5,7 @@
 #include <mutex>
 #include <optional>
 
-namespace Futures
+namespace TaskStuff
 {
     enum class FutureErrorCode : int32_t
     {

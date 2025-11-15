@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(future_continuation LANGUAGES CXX)
+project(task_stuff LANGUAGES CXX)
 
-add_library(future_continuation
-    future_continuation.cpp)
+add_library(task_stuff
+    task_stuff.cpp)
 
-set_property(TARGET future_continuation PROPERTY CXX_STANDARD 20)
+set_property(TARGET task_stuff PROPERTY CXX_STANDARD 20)
