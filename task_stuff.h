@@ -333,7 +333,8 @@ namespace TaskStuff
             }
             else
             {
-                _state_->_exception_ = std::make_unique<PromiseFutureState::InternalExceptionHolder<ExceptionT>>(std::move(exception));
+                using ExceptionHolder = PromiseFutureState<ValueT>::template InternalExceptionHolder<ExceptionT>;
+                _state_->_exception_ = std::make_unique<ExceptionHolder>(std::move(exception));
                 _state_->_cv_value_.notify_all();
             }
         }
@@ -364,6 +365,53 @@ namespace TaskStuff
                     }
                 });
         }
+
+        return whenAllContext->promise_all.GetFuture();
+    }
+
+    template <size_t index = 0, typename FnT, typename... Types1, typename... Types2>
+    void foreach_tuple_pair_element(std::tuple<Types1...>& tup1, std::tuple<Types2...>& tup2, FnT fn)
+    {
+        // Could we use std::zip for this in C++23?
+
+        static_assert(sizeof...(Types1) == sizeof...(Types2), "Mismatching number of tuple elements");
+
+        if constexpr (index < sizeof...(Types1))
+        {
+            fn(std::get<index>(tup1), std::get<index>(tup2));
+            foreach_tuple_pair_element<index + 1>(tup1, tup2, fn);
+        }
+    }
+
+    template <typename... ValuesT>
+    Future<std::tuple<ValuesT...>> WhenAll(Future<ValuesT>... futures)
+    {
+        struct WhenAllContext
+        {
+            std::tuple<ValuesT...> values;
+            std::atomic_int countdown;
+            Promise<std::tuple<ValuesT...>> promise_all;
+        };
+
+        auto whenAllContext = std::make_shared<WhenAllContext>();
+        whenAllContext->countdown = sizeof...(ValuesT);
+
+        std::tuple<Future<ValuesT>...> tupleFutures { std::move(futures)... };
+
+        foreach_tuple_pair_element(
+            tupleFutures,
+            whenAllContext->values,
+            [whenAllContext = whenAllContext] <typename T> (Future<T>& f, T& v)
+        {
+            f.Then([whenAllContext = whenAllContext, v = &v] <typename U> (U val)
+            {
+                *v = std::move(val);
+                if (0 == --whenAllContext->countdown) // The last underlying future to complete will set the value in the overall promise
+                {
+                    whenAllContext->promise_all.SetValue(std::move(whenAllContext->values));
+                }
+            });
+        });
 
         return whenAllContext->promise_all.GetFuture();
     }
