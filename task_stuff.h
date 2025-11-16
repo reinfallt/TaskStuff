@@ -403,7 +403,7 @@ namespace TaskStuff
             whenAllContext->values,
             [whenAllContext = whenAllContext] <typename T> (Future<T>& f, T& v)
         {
-            f.Then([whenAllContext = whenAllContext, v = &v] <typename U> (U val)
+            f.Then([whenAllContext = whenAllContext, v = &v] (T val)
             {
                 *v = std::move(val);
                 if (0 == --whenAllContext->countdown) // The last underlying future to complete will set the value in the overall promise
