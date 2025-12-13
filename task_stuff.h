@@ -51,16 +51,17 @@ namespace TaskStuff
 
         std::atomic_int _ref_count_ = 1;
 
-        struct InternalExceptionHolderIfc
+        struct InternalContinuationHolderIfc
         {
-            virtual void Throw() = 0;
+            virtual void Call(ValueT val) = 0;
+            virtual void SetException(std::exception_ptr e) = 0;
         };
 
-        std::mutex                                  _mtx_value_;
-        std::condition_variable                     _cv_value_;
-        std::optional<ValueT>                       _value_;
-        std::unique_ptr<InternalExceptionHolderIfc> _exception_;
-        std::optional<std::function<void(ValueT)>>  _continuation_;
+        std::mutex                                     _mtx_value_;
+        std::condition_variable                        _cv_value_;
+        std::optional<ValueT>                          _value_;
+        std::exception_ptr                             _exception_;
+        std::unique_ptr<InternalContinuationHolderIfc> _continuation_;
 
         void _addRef() { ++_ref_count_; }
 
@@ -72,24 +73,47 @@ namespace TaskStuff
             }
         }
 
-        template <typename ExceptionT>
-        struct InternalExceptionHolder : public InternalExceptionHolderIfc
+        template <typename FnT>
+        struct InternalContinuationHolder : public InternalContinuationHolderIfc
         {
-            ExceptionT _internalException;
+            using result_type = std::invoke_result_t< FnT, ValueT>;
 
-            InternalExceptionHolder(ExceptionT exception)
-                : _internalException(std::move(exception))
+            FnT                  _internal_continuation_function_;
+            Promise<result_type> _result_promise_;
+
+            InternalContinuationHolder(FnT fn, Promise<result_type> resultPromise)
+                : _internal_continuation_function_(std::move(fn))
+                , _result_promise_(std::move(resultPromise))
             {
             }
 
-            InternalExceptionHolder(InternalExceptionHolder const&) = delete;
-            InternalExceptionHolder& operator=(InternalExceptionHolder const&) = delete;
+            InternalContinuationHolder(InternalContinuationHolder const&) = delete;
+            InternalContinuationHolder& operator=(InternalContinuationHolder const&) = delete;
 
-            void Throw() override
+            void Call(ValueT val) override
             {
-                throw _internalException;
+                try
+                {
+                    auto result = _internal_continuation_function_(std::move(val));
+                    _result_promise_.SetValue(std::move(result));
+                }
+                catch (...)
+                {
+                    _result_promise_.SetException(std::current_exception());
+                }
+            }
+
+            void SetException(std::exception_ptr e) override
+            {
+                _result_promise_.SetException(e);
             }
         };
+
+        template <typename FnT, typename PromiseT>
+        void _setContinuation(FnT fn, PromiseT prom)
+        {
+            _continuation_ = std::make_unique<InternalContinuationHolder<FnT>>(std::move(fn), std::move(prom));
+        }
 
         friend class Future<ValueT>;
         friend class Promise<ValueT>;
@@ -113,7 +137,7 @@ namespace TaskStuff
         Future(Future const&) = delete;
         Future& operator=(Future const&) = delete;
 
-        Future(Future&& other) :
+        Future(Future&& other) noexcept :
             _state_(other._state_)
         {
             other._state_ = nullptr;
@@ -157,7 +181,7 @@ namespace TaskStuff
 
                 if (_state_->_exception_)
                 {
-                    _state_->_exception_->Throw();
+                    std::rethrow_exception(_state_->_exception_);
                 }
 
                 val = std::move(*_state_->_value_);
@@ -169,37 +193,51 @@ namespace TaskStuff
             return val;
         }
 
-        void Then(std::function<void(ValueT)> fn)
+        template<typename FnT>
+        auto Then(FnT fn)
         {
+            using resultType = std::invoke_result_t<FnT, ValueT>;
+
             if (!_state_)
             {
                 throw FutureError(FutureErrorCode::NoState, "Future has no state!");
             }
 
+            Promise<resultType> continuationPromise;
+            auto continuationFuture = continuationPromise.GetFuture();
+
             // Scope for lock
             {
                 std::unique_lock lck(_state_->_mtx_value_);
-
+                
                 if (_state_->_exception_)
                 {
-                    // Not sure this is how we want to handle exceptions when a continuation function is set.
-                    _state_->_exception_->Throw();
+                    continuationPromise.SetException(_state_->_exception_);
                 }
-
-                // If the promise has already been fulfilled,
-                // call the continuation function immediately
-                if (_state_->_value_.has_value())
+                else if (_state_->_value_.has_value())
                 {
-                    fn(std::move(std::move(*_state_->_value_)));
+                    // If the promise has already been fulfilled,
+                    // call the continuation function immediately
+                    try
+                    {
+                        auto result = fn(std::move(*_state_->_value_));
+                        continuationPromise.SetValue(std::move(result));
+                    }
+                    catch (...)
+                    {
+                        continuationPromise.SetException(std::current_exception());
+                    }
                 }
                 else
                 {
-                    _state_->_continuation_ = std::move(fn);
+                    _state_->_setContinuation(std::move(fn), std::move(continuationPromise));
                 }
             }
 
             _state_->_release();
             _state_ = nullptr;
+
+            return continuationFuture;
         }
     };
 
@@ -299,9 +337,9 @@ namespace TaskStuff
             _value_set_ = true;
 
             // If a continuation function is set, call it with the value
-            if (_state_->_continuation_.has_value())
+            if (_state_->_continuation_)
             {
-                (*_state_->_continuation_)(std::move(value));
+                _state_->_continuation_->Call(std::move(value));
             }
             else // Otherwise set the value in the state normally
             {
@@ -310,8 +348,7 @@ namespace TaskStuff
             }
         }
 
-        template <typename ExceptionT>
-        void SetException(ExceptionT exception)
+        void SetException(std::exception_ptr exceptionPtr)
         {
             if (_value_set_)
             {
@@ -326,17 +363,21 @@ namespace TaskStuff
             std::unique_lock lck(_state_->_mtx_value_);
             _value_set_ = true;
 
-            if (_state_->_continuation_.has_value())
+            if (_state_->_continuation_)
             {
-                // Not sure this is how we want to handle exceptions when a continuation function is set.
-                throw exception;
+                _state_->_continuation_->SetException(exceptionPtr);
             }
             else
             {
-                using ExceptionHolder = PromiseFutureState<ValueT>::template InternalExceptionHolder<ExceptionT>;
-                _state_->_exception_ = std::make_unique<ExceptionHolder>(std::move(exception));
+                _state_->_exception_ = exceptionPtr;
                 _state_->_cv_value_.notify_all();
             }
+        }
+
+        template <typename ExceptionT>
+        void SetException(ExceptionT exception)
+        {
+            SetException(std::make_exception_ptr(exception));
         }
     };
 
@@ -403,6 +444,7 @@ namespace TaskStuff
             whenAllContext->values,
             [whenAllContext = whenAllContext] <typename T> (Future<T>& f, T& v)
         {
+            // TODO: Aggregate exceptions from underlying futures
             f.Then([whenAllContext = whenAllContext, v = &v] (T val)
             {
                 *v = std::move(val);
@@ -410,6 +452,9 @@ namespace TaskStuff
                 {
                     whenAllContext->promise_all.SetValue(std::move(whenAllContext->values));
                 }
+
+                // TODO: Support for void futures
+                return 0;
             });
         });
 
