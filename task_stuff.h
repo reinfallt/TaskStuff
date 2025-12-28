@@ -6,6 +6,7 @@
 #include <mutex>
 #include <optional>
 #include <span>
+#include <vector>
 
 namespace TaskStuff
 {
@@ -397,6 +398,7 @@ namespace TaskStuff
 
         for (size_t i = 0; i < futures.size(); ++i)
         {
+            // TODO: Aggregate exceptions from underlying futures
             futures[i].Then([whenAllContext = whenAllContext, idx = i](ValueT val)
                 {
                     whenAllContext->values[idx] = std::move(val);
@@ -404,6 +406,9 @@ namespace TaskStuff
                     {
                         whenAllContext->promise_all.SetValue(std::move(whenAllContext->values));
                     }
+
+                    // TODO: Support for void futures
+                    return 0;
                 });
         }
 
