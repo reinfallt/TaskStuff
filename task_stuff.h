@@ -135,8 +135,15 @@ namespace TaskStuff
 
     public:
 
+        using value_type = ValueT;
+
         Future(Future const&) = delete;
         Future& operator=(Future const&) = delete;
+
+        Future() noexcept :
+            _state_(nullptr)
+        {
+        }
 
         Future(Future&& other) noexcept :
             _state_(other._state_)
@@ -148,6 +155,7 @@ namespace TaskStuff
         {
             _state_ = other._state_;
             other._state_ = nullptr;
+            return *this;
         }
 
         Future(ValueT value) :
