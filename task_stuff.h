@@ -188,6 +188,7 @@ namespace TaskStuff
             if (!_state_)
             {
                 chainedPromise.SetException(FutureError(FutureErrorCode::NoState, "Future has no state!"));
+                return;
             }
 
             // Scope for lock
@@ -230,8 +231,11 @@ namespace TaskStuff
             other._state_ = nullptr;
         }
 
-        Future& operator=(Future&& other)
+        Future& operator=(Future&& other) noexcept
         {
+            if (_state_)
+                _state_->_release();
+
             _state_ = other._state_;
             other._state_ = nullptr;
             return *this;
