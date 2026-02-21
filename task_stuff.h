@@ -63,6 +63,7 @@ namespace TaskStuff
         std::optional<ValueT>                          _value_;
         std::exception_ptr                             _exception_;
         std::unique_ptr<InternalContinuationHolderIfc> _continuation_;
+        std::optional<Promise<ValueT>>                 _chained_promise_;
 
         void _addRef() { ++_ref_count_; }
 
@@ -141,13 +142,7 @@ namespace TaskStuff
                     return;
                 }
 
-                //  TODO: Forward exceptions from the lower future
-
-                lowerFuture.Then([resultPromise = std::move(_result_promise_)](auto&& x) mutable
-                    {
-                        resultPromise.SetValue(std::move(x));
-                        return 0; // TODO: Support void continuations
-                    });
+                lowerFuture._setChainedPromise(std::move(_result_promise_));
             }
 
             void SetException(std::exception_ptr e) override
@@ -184,6 +179,38 @@ namespace TaskStuff
         { }
 
         friend class Promise<ValueT>;
+
+        template <typename T>
+        friend class PromiseFutureState;
+
+        void _setChainedPromise(Promise<ValueT> chainedPromise)
+        {
+            if (!_state_)
+            {
+                chainedPromise.SetException(FutureError(FutureErrorCode::NoState, "Future has no state!"));
+            }
+
+            // Scope for lock
+            {
+                std::unique_lock lck(_state_->_mtx_value_);
+
+                if (_state_->_exception_)
+                {
+                    chainedPromise.SetException(_state_->_exception_);
+                }
+                else if (_state_->_value_.has_value())
+                {
+                    chainedPromise.SetValue(std::move(*_state_->_value_));
+                }
+                else
+                {
+                    _state_->_chained_promise_ = std::move(chainedPromise);
+                }
+            }
+
+            _state_->_release();
+            _state_ = nullptr;
+        }
 
     public:
 
@@ -424,6 +451,8 @@ namespace TaskStuff
             other._state_ = nullptr;
             other._future_retrieved_ = false;
             other._value_set_ = false;
+
+            return *this;
         }
 
         ~Promise()
@@ -469,6 +498,10 @@ namespace TaskStuff
             {
                 _state_->_continuation_->Call(std::move(value));
             }
+            else if (_state_->_chained_promise_)
+            {
+                _state_->_chained_promise_->SetValue(std::move(value));
+            }
             else // Otherwise set the value in the state normally
             {
                 _state_->_value_ = std::move(value);
@@ -494,6 +527,10 @@ namespace TaskStuff
             if (_state_->_continuation_)
             {
                 _state_->_continuation_->SetException(exceptionPtr);
+            }
+            else if (_state_->_chained_promise_)
+            {
+                _state_->_chained_promise_->SetException(exceptionPtr);
             }
             else
             {
