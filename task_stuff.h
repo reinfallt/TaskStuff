@@ -651,6 +651,7 @@ namespace TaskStuff
         if constexpr (current < end)
         {
             fn(std::integral_constant<size_t, current>());
+            foreach_number<current + 1, end, FnT>(fn);
         }
     }
 
