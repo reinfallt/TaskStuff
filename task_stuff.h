@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -58,12 +59,13 @@ namespace TaskStuff
             virtual void SetException(std::exception_ptr e) = 0;
         };
 
-        std::mutex                                     _mtx_value_;
-        std::condition_variable                        _cv_value_;
-        std::optional<ValueT>                          _value_;
-        std::exception_ptr                             _exception_;
-        std::unique_ptr<InternalContinuationHolderIfc> _continuation_;
-        std::optional<Promise<ValueT>>                 _chained_promise_;
+        std::mutex                                             _mtx_value_;
+        std::condition_variable                                _cv_value_;
+        std::optional<ValueT>                                  _value_;
+        std::exception_ptr                                     _exception_;
+        std::unique_ptr<InternalContinuationHolderIfc>         _continuation_;
+        std::optional<Promise<ValueT>>                         _chained_promise_;
+        std::optional<std::function<void(std::exception_ptr)>> _on_exception_;
 
         void _addRef() { ++_ref_count_; }
 
@@ -398,6 +400,41 @@ namespace TaskStuff
 
             return continuationFuture;
         }
+
+        // TODO: Maybe enable this only on void futures once I have implemented those?
+        // Futures with values either forward their exceptions via their continuation
+        // futures or rethrow them when accessing the value
+        template<typename FnT>
+        void OnException(FnT fn)
+        {
+            if (!_state_)
+            {
+                // Not really sure if we should throw here or call the function
+                fn(std::make_exception_ptr(FutureError(FutureErrorCode::NoState, "Future has no state!")));
+                return;
+            }
+
+            // Scope for lock
+            {
+                std::unique_lock lck(_state_->_mtx_value_);
+
+                if (_state_->_exception_)
+                {
+                    fn(_state_->_exception_);
+                }
+                else if (_state_->_value_.has_value())
+                {
+                    // See comment above
+                }
+                else
+                {
+                    _state_->_on_exception_ = std::move(fn);
+                }
+            }
+
+            _state_->_release();
+            _state_ = nullptr;
+        }
     };
 
     template <typename ValueT>
@@ -536,6 +573,10 @@ namespace TaskStuff
             {
                 _state_->_chained_promise_->SetException(exceptionPtr);
             }
+            else if (_state_->_on_exception_)
+            {
+                (*_state_->_on_exception_)(exceptionPtr);
+            }
             else
             {
                 _state_->_exception_ = exceptionPtr;
@@ -558,11 +599,15 @@ namespace TaskStuff
             std::vector<ValueT> values;
             std::atomic_int countdown;
             Promise<std::vector<ValueT>> promise_all;
+            std::vector<std::exception_ptr> exceptions;
+            std::atomic_bool exception_occured;
         };
         
         auto whenAllContext = std::make_shared<WhenAllContext>();
         whenAllContext->values.resize(futures.size());
+        whenAllContext->exceptions.resize(futures.size());
         whenAllContext->countdown = futures.size();
+        whenAllContext->exception_occured = false;
 
         for (size_t i = 0; i < futures.size(); ++i)
         {
@@ -572,28 +617,40 @@ namespace TaskStuff
                     whenAllContext->values[idx] = std::move(val);
                     if (0 == --whenAllContext->countdown) // The last underlying future to complete will set the value in the overall promise
                     {
-                        whenAllContext->promise_all.SetValue(std::move(whenAllContext->values));
+                        if (whenAllContext->exception_occured)
+                        {
+                            // TODO: Set aggregated exception in promise_all
+                        }
+                        else
+                        {
+                            whenAllContext->promise_all.SetValue(std::move(whenAllContext->values));
+                        }
                     }
 
                     // TODO: Support for void futures
                     return 0;
-                });
+                }).OnException([whenAllContext = whenAllContext, idx = i](std::exception_ptr e)
+                    {
+                        whenAllContext->exceptions[idx] = e;
+                        whenAllContext->exception_occured = true;
+
+                        // The regular continuation won't be called if there is an exception so we need to do the countdown here to not get hanged
+                        if (0 == --whenAllContext->countdown)
+                        {
+                            // TODO: Set aggregated exception in promise_all
+                        }
+                    });
         }
 
         return whenAllContext->promise_all.GetFuture();
     }
 
-    template <size_t index = 0, typename FnT, typename... Types1, typename... Types2>
-    void foreach_tuple_pair_element(std::tuple<Types1...>& tup1, std::tuple<Types2...>& tup2, FnT fn)
+    template <size_t current, size_t end, typename FnT>
+    void foreach_number(FnT fn)
     {
-        // Could we use std::zip for this in C++23?
-
-        static_assert(sizeof...(Types1) == sizeof...(Types2), "Mismatching number of tuple elements");
-
-        if constexpr (index < sizeof...(Types1))
+        if constexpr (current < end)
         {
-            fn(std::get<index>(tup1), std::get<index>(tup2));
-            foreach_tuple_pair_element<index + 1>(tup1, tup2, fn);
+            fn(std::integral_constant<size_t, current>());
         }
     }
 
@@ -602,34 +659,52 @@ namespace TaskStuff
     {
         struct WhenAllContext
         {
+            std::tuple<Future<ValuesT>...> tuple_futures;
             std::tuple<ValuesT...> values;
             std::atomic_int countdown;
             Promise<std::tuple<ValuesT...>> promise_all;
+            std::array<std::exception_ptr, sizeof...(ValuesT)> exceptions;
+            std::atomic_bool exception_occured;
         };
 
         auto whenAllContext = std::make_shared<WhenAllContext>();
         whenAllContext->countdown = sizeof...(ValuesT);
+        whenAllContext->tuple_futures = std::tuple<Future<ValuesT>...>{ std::move(futures)... };
 
-        std::tuple<Future<ValuesT>...> tupleFutures { std::move(futures)... };
-
-        foreach_tuple_pair_element(
-            tupleFutures,
-            whenAllContext->values,
-            [whenAllContext = whenAllContext] <typename T> (Future<T>& f, T& v)
-        {
-            // TODO: Aggregate exceptions from underlying futures
-            f.Then([whenAllContext = whenAllContext, v = &v] (T val)
+        foreach_number<0, sizeof...(ValuesT)>([whenAllContext = whenAllContext] (auto idx)
             {
-                *v = std::move(val);
-                if (0 == --whenAllContext->countdown) // The last underlying future to complete will set the value in the overall promise
-                {
-                    whenAllContext->promise_all.SetValue(std::move(whenAllContext->values));
-                }
+                auto& current_future = std::get<idx>(whenAllContext->tuple_futures);
+                auto& current_value = std::get<idx>(whenAllContext->values);
 
-                // TODO: Support for void futures
-                return 0;
+                current_future.Then([whenAllContext = whenAllContext, v = &current_value](auto val)
+                    {
+                        *v = std::move(val);
+                        if (0 == --whenAllContext->countdown) // The last underlying future to complete will set the value in the overall promise
+                        {
+                            if (whenAllContext->exception_occured)
+                            {
+                                // TODO: Set aggregated exception in promise_all
+                            }
+                            else
+                            {
+                                whenAllContext->promise_all.SetValue(std::move(whenAllContext->values));
+                            }
+                        }
+
+                        // TODO: Support for void futures
+                        return 0;
+                    }).OnException([whenAllContext = whenAllContext, idx = idx](std::exception_ptr e)
+                        {
+                            whenAllContext->exceptions[idx] = e;
+                            whenAllContext->exception_occured = true;
+
+                            // The regular continuation won't be called if there is an exception so we need to do the countdown here to not get hanged
+                            if (0 == --whenAllContext->countdown)
+                            {
+                                // TODO: Set aggregated exception in promise_all
+                            }
+                        });
             });
-        });
 
         return whenAllContext->promise_all.GetFuture();
     }
