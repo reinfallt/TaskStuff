@@ -40,6 +40,23 @@ namespace TaskStuff
         }
     };
 
+    class ExceptionAggregate : public std::exception
+    {
+    private:
+
+        std::vector<std::exception_ptr> _exceptions_;
+
+    public:
+
+        ExceptionAggregate()
+        { }
+
+        void Add(std::exception_ptr e)
+        {
+            _exceptions_.push_back(e);
+        }
+    };
+
     template <typename ValueT>
     class Future;
 
@@ -600,26 +617,33 @@ namespace TaskStuff
             std::atomic_int countdown;
             Promise<std::vector<ValueT>> promise_all;
             std::vector<std::exception_ptr> exceptions;
-            std::atomic_bool exception_occured;
+            std::atomic_int exception_count;
         };
         
         auto whenAllContext = std::make_shared<WhenAllContext>();
         whenAllContext->values.resize(futures.size());
         whenAllContext->exceptions.resize(futures.size());
         whenAllContext->countdown = futures.size();
-        whenAllContext->exception_occured = false;
+        whenAllContext->exception_count = 0;
 
         for (size_t i = 0; i < futures.size(); ++i)
         {
-            // TODO: Aggregate exceptions from underlying futures
             futures[i].Then([whenAllContext = whenAllContext, idx = i](ValueT val)
                 {
                     whenAllContext->values[idx] = std::move(val);
                     if (0 == --whenAllContext->countdown) // The last underlying future to complete will set the value in the overall promise
                     {
-                        if (whenAllContext->exception_occured)
+                        if (whenAllContext->exception_count > 0)
                         {
-                            // TODO: Set aggregated exception in promise_all
+                            ExceptionAggregate exceptionAggregate;
+                            for (std::exception_ptr e : whenAllContext->exceptions)
+                            {
+                                if (e)
+                                {
+                                    exceptionAggregate.Add(e);
+                                }
+                            }
+                            whenAllContext->promise_all.SetException(std::move(exceptionAggregate));
                         }
                         else
                         {
@@ -632,12 +656,20 @@ namespace TaskStuff
                 }).OnException([whenAllContext = whenAllContext, idx = i](std::exception_ptr e)
                     {
                         whenAllContext->exceptions[idx] = e;
-                        whenAllContext->exception_occured = true;
+                        ++whenAllContext->exception_count;
 
                         // The regular continuation won't be called if there is an exception so we need to do the countdown here to not get hanged
                         if (0 == --whenAllContext->countdown)
                         {
-                            // TODO: Set aggregated exception in promise_all
+                            ExceptionAggregate exceptionAggregate;
+                            for (std::exception_ptr e : whenAllContext->exceptions)
+                            {
+                                if (e)
+                                {
+                                    exceptionAggregate.Add(e);
+                                }
+                            }
+                            whenAllContext->promise_all.SetException(std::move(exceptionAggregate));
                         }
                     });
         }
@@ -665,12 +697,13 @@ namespace TaskStuff
             std::atomic_int countdown;
             Promise<std::tuple<ValuesT...>> promise_all;
             std::array<std::exception_ptr, sizeof...(ValuesT)> exceptions;
-            std::atomic_bool exception_occured;
+            std::atomic_int exception_count;
         };
 
         auto whenAllContext = std::make_shared<WhenAllContext>();
         whenAllContext->countdown = sizeof...(ValuesT);
         whenAllContext->tuple_futures = std::tuple<Future<ValuesT>...>{ std::move(futures)... };
+        whenAllContext->exception_count = 0;
 
         foreach_number<0, sizeof...(ValuesT)>([whenAllContext = whenAllContext] (auto idx)
             {
@@ -682,9 +715,17 @@ namespace TaskStuff
                         *v = std::move(val);
                         if (0 == --whenAllContext->countdown) // The last underlying future to complete will set the value in the overall promise
                         {
-                            if (whenAllContext->exception_occured)
+                            if (whenAllContext->exception_count > 0)
                             {
-                                // TODO: Set aggregated exception in promise_all
+                                ExceptionAggregate exceptionAggregate;
+                                for (std::exception_ptr e : whenAllContext->exceptions)
+                                {
+                                    if (e)
+                                    {
+                                        exceptionAggregate.Add(e);
+                                    }
+                                }
+                                whenAllContext->promise_all.SetException(std::move(exceptionAggregate));
                             }
                             else
                             {
@@ -697,12 +738,20 @@ namespace TaskStuff
                     }).OnException([whenAllContext = whenAllContext, idx = idx](std::exception_ptr e)
                         {
                             whenAllContext->exceptions[idx] = e;
-                            whenAllContext->exception_occured = true;
+                            ++whenAllContext->exception_count;
 
                             // The regular continuation won't be called if there is an exception so we need to do the countdown here to not get hanged
                             if (0 == --whenAllContext->countdown)
                             {
-                                // TODO: Set aggregated exception in promise_all
+                                ExceptionAggregate exceptionAggregate;
+                                for (std::exception_ptr e : whenAllContext->exceptions)
+                                {
+                                    if (e)
+                                    {
+                                        exceptionAggregate.Add(e);
+                                    }
+                                }
+                                whenAllContext->promise_all.SetException(std::move(exceptionAggregate));
                             }
                         });
             });
