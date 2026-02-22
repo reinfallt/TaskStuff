@@ -130,6 +130,7 @@ namespace TaskStuff
             }
         };
 
+        // When the continuation function itself returns another Future object
         template <typename FnT>
         struct InternalChainedContinuationHolder : public InternalContinuationHolderIfc
         {
@@ -161,6 +162,7 @@ namespace TaskStuff
                     return;
                 }
 
+                // "Chain" our promise to the Future returned from the continuation function
                 lowerFuture._setChainedPromise(std::move(_result_promise_));
             }
 
@@ -316,6 +318,9 @@ namespace TaskStuff
         template <typename T>
         struct _is_not_future<Future<T>> { static constexpr bool value = false; };
 
+        // If the continuation function itself returns another Future object,
+        // we don't want to end up with something that looks like this on the top level: Future<Future<Future<Future<int>>>>.
+        // This specialization causes the Future on the top level to still be a simple Future<int> that can be awaited.
         template<typename FnT>
         std::enable_if_t<
             _is_future<std::invoke_result_t<FnT, ValueT>>::value,
