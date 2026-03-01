@@ -76,6 +76,7 @@ namespace TaskStuff
         {
             virtual void Call(ValueT val) = 0;
             virtual void SetException(std::exception_ptr e) = 0;
+            virtual ~InternalContinuationHolderIfc() {}
         };
 
         std::mutex                                             _mtx_value_;
@@ -672,6 +673,7 @@ namespace TaskStuff
         {
             virtual void Call() = 0;
             virtual void SetException(std::exception_ptr e) = 0;
+            virtual ~InternalContinuationHolderIfc() {}
         };
 
         std::mutex                                             _mtx_value_;
