@@ -2,11 +2,13 @@
 
 #include <array>
 #include <atomic>
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <vector>
 
 namespace TaskStuff
@@ -21,7 +23,7 @@ namespace TaskStuff
         NoState                 = 4
     };
 
-    class FutureError : public std::exception
+    class FutureError : public std::runtime_error
     {
     private:
 
@@ -30,7 +32,7 @@ namespace TaskStuff
     public:
 
         FutureError(FutureErrorCode errorCode, const char* msg)
-            : std::exception(msg)
+            : std::runtime_error(msg)
             , _error_code_(errorCode)
         { }
 
@@ -142,7 +144,7 @@ namespace TaskStuff
         template <typename FnT>
         struct InternalChainedContinuationHolder : public InternalContinuationHolderIfc
         {
-            using interal_future_type = std::invoke_result_t< FnT, ValueT>;
+            using interal_future_type = std::invoke_result_t<FnT, ValueT>;
             using result_type = typename interal_future_type::value_type;
 
             FnT                  _internal_continuation_function_;
@@ -180,14 +182,14 @@ namespace TaskStuff
             }
         };
 
-        template <typename FnT, typename ValueT>
-        void _setContinuation(FnT fn, Promise<ValueT> prom)
+        template <typename FnT>
+        void _setContinuation(FnT fn, Promise<std::invoke_result_t<FnT, ValueT>> prom)
         {
             _continuation_ = std::make_unique<InternalContinuationHolder<FnT>>(std::move(fn), std::move(prom));
         }
 
-        template <typename FnT, typename ValueT>
-        void _setChainedContinuation(FnT fn, Promise<ValueT> prom)
+        template <typename FnT>
+        void _setChainedContinuation(FnT fn, Promise<typename std::invoke_result_t<FnT, ValueT>::value_type> prom)
         {
             _continuation_ = std::make_unique<InternalChainedContinuationHolder<FnT>>(std::move(fn), std::move(prom));
         }
@@ -776,14 +778,14 @@ namespace TaskStuff
             }
         };
 
-        template <typename FnT, typename ValueT>
-        void _setContinuation(FnT fn, Promise<ValueT> prom)
+        template <typename FnT>
+        void _setContinuation(FnT fn, Promise<std::invoke_result_t<FnT>> prom)
         {
             _continuation_ = std::make_unique<InternalContinuationHolder<FnT>>(std::move(fn), std::move(prom));
         }
 
-        template <typename FnT, typename ValueT>
-        void _setChainedContinuation(FnT fn, Promise<ValueT> prom)
+        template <typename FnT>
+        void _setChainedContinuation(FnT fn, Promise<typename std::invoke_result_t<FnT>::value_type> prom)
         {
             _continuation_ = std::make_unique<InternalChainedContinuationHolder<FnT>>(std::move(fn), std::move(prom));
         }
