@@ -602,10 +602,11 @@ namespace TaskStuff
         }
     };
 
-
+    // Forward declaration
     template <>
     class PromiseFutureState<void>;
 
+    // Promise<void> specialization
     template <>
     class Promise<void>
     {
@@ -667,6 +668,7 @@ namespace TaskStuff
         }
     };
 
+    // PromiseFutureState<void> specialization
     template <>
     class PromiseFutureState<void>
     {
