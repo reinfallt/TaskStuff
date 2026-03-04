@@ -285,6 +285,11 @@ namespace TaskStuff
                 _state_->_release();
         }
 
+        bool Valid() const
+        {
+            return _state_ != nullptr;
+        }
+
         ValueT Get()
         {
             if (!_state_)
@@ -848,6 +853,11 @@ namespace TaskStuff
         {
             if (_state_)
                 _state_->_release();
+        }
+
+        bool Valid() const
+        {
+            return _state_ != nullptr;
         }
 
         void Get()
