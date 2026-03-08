@@ -272,13 +272,13 @@ namespace TaskStuff
 
         std::atomic_int _ref_count_ = 1;
 
-        std::mutex                                              _mtx_value_;
-        std::condition_variable                                 _cv_value_;
-        std::optional<ValueT>                                   _value_;
-        std::exception_ptr                                      _exception_;
-        std::unique_ptr<_InternalContinuationHolderIfc<ValueT>> _continuation_;
-        std::optional<Promise<ValueT>>                          _chained_promise_;
-        std::optional<std::function<void(std::exception_ptr)>>  _on_exception_;
+        std::mutex                                                                              _mtx_value_;
+        std::condition_variable                                                                 _cv_value_;
+        std::optional<std::conditional_t<std::is_same_v<ValueT, void>, std::monostate, ValueT>> _value_;
+        std::exception_ptr                                                                      _exception_;
+        std::unique_ptr<_InternalContinuationHolderIfc<ValueT>>                                 _continuation_;
+        std::optional<Promise<ValueT>>                                                          _chained_promise_;
+        std::optional<std::function<void(std::exception_ptr)>>                                  _on_exception_;
 
         void _addRef() { ++_ref_count_; }
 
@@ -714,10 +714,6 @@ namespace TaskStuff
         }
     };
 
-    // Forward declaration
-    template <>
-    class PromiseFutureState<void>;
-
     // Promise<void> specialization
     template <>
     class Promise<void>
@@ -778,48 +774,6 @@ namespace TaskStuff
         {
             SetException(std::make_exception_ptr(exception));
         }
-    };
-
-    // PromiseFutureState<void> specialization
-    template <>
-    class PromiseFutureState<void>
-    {
-    private:
-
-        std::atomic_int _ref_count_ = 1;
-
-        std::mutex                                             _mtx_value_;
-        std::condition_variable                                _cv_value_;
-        bool                                                   _done_;
-        std::exception_ptr                                     _exception_;
-        std::unique_ptr<_InternalContinuationHolderIfc<void>>  _continuation_;
-        std::optional<Promise<void>>                           _chained_promise_;
-        std::optional<std::function<void(std::exception_ptr)>> _on_exception_;
-
-        void _addRef() { ++_ref_count_; }
-
-        void _release()
-        {
-            if (0 == --_ref_count_)
-            {
-                delete this;
-            }
-        }
-
-        template <typename FnT>
-        void _setContinuation(FnT fn, Promise<std::invoke_result_t<FnT>> prom)
-        {
-            _continuation_ = std::make_unique<_InternalContinuationHolder<FnT, void>>(std::move(fn), std::move(prom));
-        }
-
-        template <typename FnT>
-        void _setChainedContinuation(FnT fn, Promise<typename std::invoke_result_t<FnT>::value_type> prom)
-        {
-            _continuation_ = std::make_unique<_InternalChainedContinuationHolder<FnT, void>>(std::move(fn), std::move(prom));
-        }
-
-        friend class Future<void>;
-        friend class Promise<void>;
     };
 
     // Future<void> specialization
@@ -895,7 +849,7 @@ namespace TaskStuff
             {
                 std::unique_lock lck(_state_->_mtx_value_);
 
-                while (!_state_->_done_ && !_state_->_exception_)
+                while (!_state_->_value_.has_value() && !_state_->_exception_)
                 {
                     _state_->_cv_value_.wait(lck);
                 }
@@ -937,7 +891,7 @@ namespace TaskStuff
                     continuationFuture = continuationPromise.GetFuture();
                     continuationPromise.SetException(_state_->_exception_);
                 }
-                else if (_state_->_done_)
+                else if (_state_->_value_.has_value())
                 {
                     // If the promise has already been fulfilled,
                     // call the continuation function immediately
@@ -989,7 +943,7 @@ namespace TaskStuff
                 {
                     continuationPromise.SetException(_state_->_exception_);
                 }
-                else if (_state_->_done_)
+                else if (_state_->_value_.has_value())
                 {
                     // If the promise has already been fulfilled,
                     // call the continuation function immediately
@@ -1041,7 +995,7 @@ namespace TaskStuff
                 {
                     fn(_state_->_exception_);
                 }
-                else if (_state_->_done_)
+                else if (_state_->_value_.has_value())
                 {
                     // Already complete
                 }

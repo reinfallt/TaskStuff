@@ -67,7 +67,7 @@ namespace TaskStuff
         }
         else // Otherwise set the value in the state normally
         {
-            _state_->_done_ = true;
+            _state_->_value_.emplace();
             _state_->_cv_value_.notify_all();
         }
     }
@@ -123,7 +123,7 @@ namespace TaskStuff
             {
                 chainedPromise.SetException(_state_->_exception_);
             }
-            else if (_state_->_done_)
+            else if (_state_->_value_.has_value())
             {
                 chainedPromise.SetDone();
             }
