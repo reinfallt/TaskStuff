@@ -60,6 +60,12 @@ namespace TaskStuff
     };
 
     template <typename ValueT>
+    class _InternalFutureBase;
+
+    template <typename ValueT>
+    class _InternalPromiseBase;
+
+    template <typename ValueT>
     class Future;
 
     template <typename ValueT>
@@ -505,7 +511,7 @@ namespace TaskStuff
             _InternalFutureBase<ValueT>::_state_ = state;
         }
 
-        friend class Promise<ValueT>;
+        friend class _InternalPromiseBase<ValueT>;
 
     public:
 
@@ -550,7 +556,7 @@ namespace TaskStuff
             _state_ = state;
         }
 
-        friend class Promise<void>;
+        friend class _InternalPromiseBase<void>;
 
     public:
 
@@ -575,16 +581,16 @@ namespace TaskStuff
     };
 
     template <typename ValueT>
-    class Promise
+    class _InternalPromiseBase
     {
-    private:
+    protected:
 
         PromiseFutureState<ValueT>* _state_;
         bool _future_retrieved_;
         bool _value_set_;
 
-        Promise(Promise const&) = delete;
-        Promise& operator=(Promise const&) = delete;
+        _InternalPromiseBase(_InternalPromiseBase const&) = delete;
+        _InternalPromiseBase& operator=(_InternalPromiseBase const&) = delete;
 
         void _clear()
         {
@@ -600,40 +606,16 @@ namespace TaskStuff
             }
         }
 
-    public:
-
-        Promise()
+        _InternalPromiseBase()
             : _state_(new PromiseFutureState<ValueT>())
             , _future_retrieved_(false)
             , _value_set_(false)
-        { }
-
-        Promise(Promise && other) noexcept
-            : _state_(other._state_)
-            , _future_retrieved_(other._future_retrieved_)
-            , _value_set_(other._value_set_)
         {
-            other._state_ = nullptr;
-            other._future_retrieved_ = false;
-            other._value_set_ = false;
         }
 
-        Promise& operator=(Promise&& other) noexcept
-        {
-            _clear();
+    public:
 
-            _state_ = other._state_;
-            _future_retrieved_ = other._future_retrieved_;
-            _value_set_ = other._value_set_;
-
-            other._state_ = nullptr;
-            other._future_retrieved_ = false;
-            other._value_set_ = false;
-
-            return *this;
-        }
-
-        ~Promise()
+        ~_InternalPromiseBase()
         {
             _clear();
         }
@@ -654,37 +636,6 @@ namespace TaskStuff
             _state_->_addRef();
 
             return Future<ValueT>(_state_);
-        }
-
-        void SetValue(ValueT value)
-        {
-            if (_value_set_)
-            {
-                throw FutureError(FutureErrorCode::PromiseAlreadySatisfied, "Promise value already set!");
-            }
-
-            if (!_state_)
-            {
-                throw FutureError(FutureErrorCode::NoState, "Promise has no state!");
-            }
-
-            std::unique_lock lck(_state_->_mtx_value_);
-            _value_set_ = true;
-
-            // If a continuation function is set, call it with the value
-            if (_state_->_continuation_)
-            {
-                _state_->_continuation_->Call(std::move(value));
-            }
-            else if (_state_->_chained_promise_)
-            {
-                _state_->_chained_promise_->SetValue(std::move(value));
-            }
-            else // Otherwise set the value in the state normally
-            {
-                _state_->_value_ = std::move(value);
-                _state_->_cv_value_.notify_all();
-            }
         }
 
         void SetException(std::exception_ptr exceptionPtr)
@@ -728,33 +679,90 @@ namespace TaskStuff
         }
     };
 
-    // Promise<void> specialization
-    template <>
-    class Promise<void>
+    template <typename ValueT>
+    class Promise : public _InternalPromiseBase<ValueT>
     {
-    private:
-
-        PromiseFutureState<void>* _state_;
-        bool _future_retrieved_;
-        bool _is_done_;
-
-        Promise(Promise const&) = delete;
-        Promise& operator=(Promise const&) = delete;
-
-        void _clear();
-
     public:
 
-        Promise();
+        Promise()
+        { }
 
         Promise(Promise&& other) noexcept
-            : _state_(other._state_)
-            , _future_retrieved_(other._future_retrieved_)
-            , _is_done_(other._is_done_)
         {
+            _InternalPromiseBase<ValueT>::_state_ = other._state_;
+            _InternalPromiseBase<ValueT>::_future_retrieved_ = other._future_retrieved_;
+            _InternalPromiseBase<ValueT>::_value_set_ = other._value_set_;
+
             other._state_ = nullptr;
             other._future_retrieved_ = false;
-            other._is_done_ = false;
+            other._value_set_ = false;
+        }
+
+        Promise& operator=(Promise&& other) noexcept
+        {
+            _InternalPromiseBase<ValueT>::_clear();
+
+            _InternalPromiseBase<ValueT>::_state_ = other._state_;
+            _InternalPromiseBase<ValueT>::_future_retrieved_ = other._future_retrieved_;
+            _InternalPromiseBase<ValueT>::_value_set_ = other._value_set_;
+
+            other._state_ = nullptr;
+            other._future_retrieved_ = false;
+            other._value_set_ = false;
+
+            return *this;
+        }
+
+        void SetValue(ValueT value)
+        {
+            if (_InternalPromiseBase<ValueT>::_value_set_)
+            {
+                throw FutureError(FutureErrorCode::PromiseAlreadySatisfied, "Promise value already set!");
+            }
+
+            if (!_InternalPromiseBase<ValueT>::_state_)
+            {
+                throw FutureError(FutureErrorCode::NoState, "Promise has no state!");
+            }
+
+            std::unique_lock lck(_InternalPromiseBase<ValueT>::_state_->_mtx_value_);
+            _InternalPromiseBase<ValueT>::_value_set_ = true;
+
+            // If a continuation function is set, call it with the value
+            if (_InternalPromiseBase<ValueT>::_state_->_continuation_)
+            {
+                _InternalPromiseBase<ValueT>::_state_->_continuation_->Call(std::move(value));
+            }
+            else if (_InternalPromiseBase<ValueT>::_state_->_chained_promise_)
+            {
+                _InternalPromiseBase<ValueT>::_state_->_chained_promise_->SetValue(std::move(value));
+            }
+            else // Otherwise set the value in the state normally
+            {
+                _InternalPromiseBase<ValueT>::_state_->_value_ = std::move(value);
+                _InternalPromiseBase<ValueT>::_state_->_cv_value_.notify_all();
+            }
+        }
+    };
+
+    template <>
+    class Promise<void> : public _InternalPromiseBase<void>
+    {
+    public:
+
+        Promise()
+        {
+        }
+
+        Promise(Promise&& other) noexcept
+        {
+            _state_ = other._state_;
+            _future_retrieved_ = other._future_retrieved_;
+            _value_set_ = other._value_set_;
+
+            other._state_ = nullptr;
+            other._future_retrieved_ = false;
+            other._value_set_ = false;
         }
 
         Promise& operator=(Promise&& other) noexcept
@@ -763,31 +771,16 @@ namespace TaskStuff
 
             _state_ = other._state_;
             _future_retrieved_ = other._future_retrieved_;
-            _is_done_ = other._is_done_;
+            _value_set_ = other._value_set_;
 
             other._state_ = nullptr;
             other._future_retrieved_ = false;
-            other._is_done_ = false;
+            other._value_set_ = false;
 
             return *this;
         }
 
-        ~Promise()
-        {
-            _clear();
-        }
-
-        Future<void> GetFuture();
-
         void SetDone();
-
-        void SetException(std::exception_ptr exceptionPtr);
-
-        template <typename ExceptionT>
-        void SetException(ExceptionT exception)
-        {
-            SetException(std::make_exception_ptr(exception));
-        }
     };
 
     template <typename ValueT>
@@ -829,6 +822,7 @@ namespace TaskStuff
         }
 
         friend class _InternalFutureBase<ValueT>;
+        friend class _InternalPromiseBase<ValueT>;
         friend class Future<ValueT>;
         friend class Promise<ValueT>;
         //friend class PersistentFuture<ValueT>;
