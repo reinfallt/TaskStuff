@@ -1043,6 +1043,8 @@ namespace TaskStuff
         PersistentFuture(Future<ValueT> fut)
             : _persistent_state_(std::make_shared<_persistentState>())
         {
+            // Set a "proxy" continuation function on the base future that will set
+            // the value in the persistent state and call all continuation functions.
             fut.Then([persistent_state = _persistent_state_](ValueT value)
                 {
                     std::unique_lock lock(persistent_state->_mtx_value_);
