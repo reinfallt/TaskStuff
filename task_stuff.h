@@ -519,9 +519,7 @@ namespace TaskStuff
         Future& operator=(Future const&) = delete;
 
         Future() noexcept
-        {
-            _InternalFutureBase<ValueT>::_state_ = nullptr;
-        }
+        { }
 
         Future(Future&& other) noexcept
         {
@@ -564,9 +562,7 @@ namespace TaskStuff
         Future& operator=(Future const&) = delete;
 
         Future() noexcept
-        {
-            _state_ = nullptr;
-        }
+        { }
 
         Future(Future&& other) noexcept
         {
