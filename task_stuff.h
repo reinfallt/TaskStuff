@@ -9,6 +9,7 @@
 #include <optional>
 #include <span>
 #include <stdexcept>
+#include <variant> // Needed for std::monostate (Should perhaps just define my own. It is literally just an empty struct.
 #include <vector>
 
 namespace TaskStuff
