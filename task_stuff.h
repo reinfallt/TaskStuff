@@ -76,6 +76,13 @@ namespace TaskStuff
         virtual ~_InternalContinuationHolderIfc() {}
     };
 
+    template <>
+    struct _InternalContinuationHolderIfc<void>
+    {
+        virtual void Call() = 0;
+        virtual void SetException(std::exception_ptr e) = 0;
+        virtual ~_InternalContinuationHolderIfc() {}
+    };
 
     template <typename FnT, typename ValueT>
     struct _InternalContinuationHolder : public _InternalContinuationHolderIfc<ValueT>
@@ -100,15 +107,19 @@ namespace TaskStuff
             {
                 if constexpr (std::is_same_v<result_type, void>)
                 {
-                    // TODO: Check if val is const&
-                    _internal_continuation_function_(std::move(val));
+                    if constexpr (std::is_reference_v<ValueT>)
+                        _internal_continuation_function_(val);
+                    else
+                        _internal_continuation_function_(std::move(val));
+
                     _result_promise_.SetDone();
                 }
                 else
                 {
-                    // TODO: Check if val is const&
-                    auto result = _internal_continuation_function_(std::move(val));
-                    _result_promise_.SetValue(std::move(result));
+                    if constexpr (std::is_reference_v<ValueT>)
+                        _result_promise_.SetValue(_internal_continuation_function_(val));
+                    else
+                        _result_promise_.SetValue(_internal_continuation_function_(std::move(val)));
                 }
             }
             catch (...)
@@ -147,8 +158,96 @@ namespace TaskStuff
             internal_future_type lowerFuture;
             try
             {
-                // TODO: Check if val is const&
-                lowerFuture = _internal_continuation_function_(std::move(val));
+                if constexpr (std::is_reference_v<ValueT>)
+                    lowerFuture = _internal_continuation_function_(val);
+                else
+                    lowerFuture = _internal_continuation_function_(std::move(val));
+            }
+            catch (...)
+            {
+                _result_promise_.SetException(std::current_exception());
+                return;
+            }
+
+            // "Chain" our promise to the Future returned from the continuation function
+            lowerFuture._setChainedPromise(std::move(_result_promise_));
+        }
+
+        void SetException(std::exception_ptr e) override
+        {
+            _result_promise_.SetException(e);
+        }
+    };
+
+    template <typename FnT>
+    struct _InternalContinuationHolder<FnT, void> : public _InternalContinuationHolderIfc<void>
+    {
+        using result_type = std::invoke_result_t<FnT>;
+
+        FnT                  _internal_continuation_function_;
+        Promise<result_type> _result_promise_;
+
+        _InternalContinuationHolder(FnT fn, Promise<result_type> resultPromise)
+            : _internal_continuation_function_(std::move(fn))
+            , _result_promise_(std::move(resultPromise))
+        {
+        }
+
+        _InternalContinuationHolder(_InternalContinuationHolder const&) = delete;
+        _InternalContinuationHolder& operator=(_InternalContinuationHolder const&) = delete;
+
+        void Call() override
+        {
+            try
+            {
+                if constexpr (std::is_same_v<result_type, void>)
+                {
+                    _internal_continuation_function_();
+                    _result_promise_.SetDone();
+                }
+                else
+                {
+                    auto result = _internal_continuation_function_();
+                    _result_promise_.SetValue(std::move(result));
+                }
+            }
+            catch (...)
+            {
+                _result_promise_.SetException(std::current_exception());
+            }
+        }
+
+        void SetException(std::exception_ptr e) override
+        {
+            _result_promise_.SetException(e);
+        }
+    };
+
+    // When the continuation function itself returns another Future object
+    template <typename FnT>
+    struct _InternalChainedContinuationHolder<FnT, void> : public _InternalContinuationHolderIfc<void>
+    {
+        using internal_future_type = std::invoke_result_t<FnT>;
+        using result_type = typename internal_future_type::value_type;
+
+        FnT                  _internal_continuation_function_;
+        Promise<result_type> _result_promise_;
+
+        _InternalChainedContinuationHolder(FnT fn, Promise<result_type> resultPromise)
+            : _internal_continuation_function_(std::move(fn))
+            , _result_promise_(std::move(resultPromise))
+        {
+        }
+
+        _InternalChainedContinuationHolder(_InternalChainedContinuationHolder const&) = delete;
+        _InternalChainedContinuationHolder& operator=(_InternalChainedContinuationHolder const&) = delete;
+
+        void Call() override
+        {
+            internal_future_type lowerFuture;
+            try
+            {
+                lowerFuture = _internal_continuation_function_();
             }
             catch (...)
             {
@@ -689,18 +788,11 @@ namespace TaskStuff
 
         std::atomic_int _ref_count_ = 1;
 
-        struct InternalContinuationHolderIfc
-        {
-            virtual void Call() = 0;
-            virtual void SetException(std::exception_ptr e) = 0;
-            virtual ~InternalContinuationHolderIfc() {}
-        };
-
         std::mutex                                             _mtx_value_;
         std::condition_variable                                _cv_value_;
         bool                                                   _done_;
         std::exception_ptr                                     _exception_;
-        std::unique_ptr<InternalContinuationHolderIfc>         _continuation_;
+        std::unique_ptr<_InternalContinuationHolderIfc<void>>  _continuation_;
         std::optional<Promise<void>>                           _chained_promise_;
         std::optional<std::function<void(std::exception_ptr)>> _on_exception_;
 
@@ -715,101 +807,15 @@ namespace TaskStuff
         }
 
         template <typename FnT>
-        struct InternalContinuationHolder : public InternalContinuationHolderIfc
-        {
-            using result_type = std::invoke_result_t<FnT>;
-
-            FnT                  _internal_continuation_function_;
-            Promise<result_type> _result_promise_;
-
-            InternalContinuationHolder(FnT fn, Promise<result_type> resultPromise)
-                : _internal_continuation_function_(std::move(fn))
-                , _result_promise_(std::move(resultPromise))
-            {
-            }
-
-            InternalContinuationHolder(InternalContinuationHolder const&) = delete;
-            InternalContinuationHolder& operator=(InternalContinuationHolder const&) = delete;
-
-            void Call() override
-            {
-                try
-                {
-                    if constexpr (std::is_same_v<result_type, void>)
-                    {
-                        _internal_continuation_function_();
-                        _result_promise_.SetDone();
-                    }
-                    else
-                    {
-                        auto result = _internal_continuation_function_();
-                        _result_promise_.SetValue(std::move(result));
-                    }
-                }
-                catch (...)
-                {
-                    _result_promise_.SetException(std::current_exception());
-                }
-            }
-
-            void SetException(std::exception_ptr e) override
-            {
-                _result_promise_.SetException(e);
-            }
-        };
-
-        // When the continuation function itself returns another Future object
-        template <typename FnT>
-        struct InternalChainedContinuationHolder : public InternalContinuationHolderIfc
-        {
-            using internal_future_type = std::invoke_result_t<FnT>;
-            using result_type = typename internal_future_type::value_type;
-
-            FnT                  _internal_continuation_function_;
-            Promise<result_type> _result_promise_;
-
-            InternalChainedContinuationHolder(FnT fn, Promise<result_type> resultPromise)
-                : _internal_continuation_function_(std::move(fn))
-                , _result_promise_(std::move(resultPromise))
-            {
-            }
-
-            InternalChainedContinuationHolder(InternalChainedContinuationHolder const&) = delete;
-            InternalChainedContinuationHolder& operator=(InternalChainedContinuationHolder const&) = delete;
-
-            void Call() override
-            {
-                internal_future_type lowerFuture;
-                try
-                {
-                    lowerFuture = _internal_continuation_function_();
-                }
-                catch (...)
-                {
-                    _result_promise_.SetException(std::current_exception());
-                    return;
-                }
-
-                // "Chain" our promise to the Future returned from the continuation function
-                lowerFuture._setChainedPromise(std::move(_result_promise_));
-            }
-
-            void SetException(std::exception_ptr e) override
-            {
-                _result_promise_.SetException(e);
-            }
-        };
-
-        template <typename FnT>
         void _setContinuation(FnT fn, Promise<std::invoke_result_t<FnT>> prom)
         {
-            _continuation_ = std::make_unique<InternalContinuationHolder<FnT>>(std::move(fn), std::move(prom));
+            _continuation_ = std::make_unique<_InternalContinuationHolder<FnT, void>>(std::move(fn), std::move(prom));
         }
 
         template <typename FnT>
         void _setChainedContinuation(FnT fn, Promise<typename std::invoke_result_t<FnT>::value_type> prom)
         {
-            _continuation_ = std::make_unique<InternalChainedContinuationHolder<FnT>>(std::move(fn), std::move(prom));
+            _continuation_ = std::make_unique<_InternalChainedContinuationHolder<FnT, void>>(std::move(fn), std::move(prom));
         }
 
         friend class Future<void>;
