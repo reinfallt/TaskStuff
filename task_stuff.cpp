@@ -106,34 +106,13 @@ namespace TaskStuff
         }
     }
 
-
-    void Future<void>::_setChainedPromise(Promise<void> chainedPromise)
+    Future<void>& Future<void>::operator=(Future<void>&& other) noexcept
     {
-        if (!_state_)
-        {
-            chainedPromise.SetException(FutureError(FutureErrorCode::NoState, "Future has no state!"));
-            return;
-        }
+        if (_state_)
+            _state_->_release();
 
-        // Scope for lock
-        {
-            std::unique_lock lck(_state_->_mtx_value_);
-
-            if (_state_->_exception_)
-            {
-                chainedPromise.SetException(_state_->_exception_);
-            }
-            else if (_state_->_value_.has_value())
-            {
-                chainedPromise.SetDone();
-            }
-            else
-            {
-                _state_->_chained_promise_ = std::move(chainedPromise);
-            }
-        }
-
-        _state_->_release();
-        _state_ = nullptr;
+        _state_ = other._state_;
+        other._state_ = nullptr;
+        return *this;
     }
 }
