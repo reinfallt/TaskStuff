@@ -76,28 +76,37 @@ namespace TaskStuff
     class PersistentFuture;
 
     template <typename ValueT>
-    struct _InternalContinuationHolderIfc
+    class _InternalContinuationHolderIfc
     {
-        virtual void Call(ValueT val) = 0;
-        virtual void SetException(std::exception_ptr e) = 0;
+    public:
+
         virtual ~_InternalContinuationHolderIfc() {}
+
+        virtual void Call(ValueT val) = 0;
+        virtual void SetException(std::exception_ptr e) = 0;    
     };
 
     template <>
-    struct _InternalContinuationHolderIfc<void>
+    class _InternalContinuationHolderIfc<void>
     {
+   
+    public:
+
+        virtual ~_InternalContinuationHolderIfc() {}
+
         virtual void Call() = 0;
         virtual void SetException(std::exception_ptr e) = 0;
-        virtual ~_InternalContinuationHolderIfc() {}
     };
 
     template <typename FnT, typename ValueT>
-    struct _InternalContinuationHolder : public _InternalContinuationHolderIfc<ValueT>
+    class _InternalContinuationHolder : public _InternalContinuationHolderIfc<ValueT>
     {
         using result_type = std::invoke_result_t<FnT, ValueT>;
 
         FnT                  _internal_continuation_function_;
         Promise<result_type> _result_promise_;
+
+    public:
 
         _InternalContinuationHolder(FnT fn, Promise<result_type> resultPromise)
             : _internal_continuation_function_(std::move(fn))
@@ -143,13 +152,15 @@ namespace TaskStuff
 
     // When the continuation function itself returns another Future object
     template <typename FnT, typename ValueT>
-    struct _InternalChainedContinuationHolder : public _InternalContinuationHolderIfc<ValueT>
+    class _InternalChainedContinuationHolder : public _InternalContinuationHolderIfc<ValueT>
     {
         using internal_future_type = std::invoke_result_t<FnT, ValueT>;
         using result_type = typename internal_future_type::value_type;
 
         FnT                  _internal_continuation_function_;
         Promise<result_type> _result_promise_;
+
+    public:
 
         _InternalChainedContinuationHolder(FnT fn, Promise<result_type> resultPromise)
             : _internal_continuation_function_(std::move(fn))
@@ -187,12 +198,14 @@ namespace TaskStuff
     };
 
     template <typename FnT>
-    struct _InternalContinuationHolder<FnT, void> : public _InternalContinuationHolderIfc<void>
+    class _InternalContinuationHolder<FnT, void> : public _InternalContinuationHolderIfc<void>
     {
         using result_type = std::invoke_result_t<FnT>;
 
         FnT                  _internal_continuation_function_;
         Promise<result_type> _result_promise_;
+
+    public:
 
         _InternalContinuationHolder(FnT fn, Promise<result_type> resultPromise)
             : _internal_continuation_function_(std::move(fn))
@@ -232,13 +245,15 @@ namespace TaskStuff
 
     // When the continuation function itself returns another Future object
     template <typename FnT>
-    struct _InternalChainedContinuationHolder<FnT, void> : public _InternalContinuationHolderIfc<void>
+    class _InternalChainedContinuationHolder<FnT, void> : public _InternalContinuationHolderIfc<void>
     {
         using internal_future_type = std::invoke_result_t<FnT>;
         using result_type = typename internal_future_type::value_type;
 
         FnT                  _internal_continuation_function_;
         Promise<result_type> _result_promise_;
+
+    public:
 
         _InternalChainedContinuationHolder(FnT fn, Promise<result_type> resultPromise)
             : _internal_continuation_function_(std::move(fn))
