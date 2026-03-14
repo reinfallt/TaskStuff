@@ -9,11 +9,12 @@
 #include <optional>
 #include <span>
 #include <stdexcept>
-#include <variant> // Needed for std::monostate (Should perhaps just define my own. It is literally just an empty struct.)
 #include <vector>
 
 namespace TaskStuff
 {
+    struct VoidPlaceHolder {};
+
     enum class FutureErrorCode : int32_t
     {
         None                    = 0,
@@ -377,7 +378,7 @@ namespace TaskStuff
                 throw FutureError(FutureErrorCode::NoState, "Future has no state!");
             }
 
-            std::conditional_t<std::is_same_v<ValueT, void>, std::monostate, ValueT> val;
+            std::conditional_t<std::is_same_v<ValueT, void>, VoidPlaceHolder, ValueT> val;
 
             // Scope for lock
             {
@@ -802,13 +803,13 @@ namespace TaskStuff
 
         std::atomic_int _ref_count_ = 1;
 
-        std::mutex                                                                              _mtx_value_;
-        std::condition_variable                                                                 _cv_value_;
-        std::optional<std::conditional_t<std::is_same_v<ValueT, void>, std::monostate, ValueT>> _value_;
-        std::exception_ptr                                                                      _exception_;
-        std::unique_ptr<_InternalContinuationHolderIfc<ValueT>>                                 _continuation_;
-        std::optional<Promise<ValueT>>                                                          _chained_promise_;
-        std::optional<std::function<void(std::exception_ptr)>>                                  _on_exception_;
+        std::mutex                                                                               _mtx_value_;
+        std::condition_variable                                                                  _cv_value_;
+        std::optional<std::conditional_t<std::is_same_v<ValueT, void>, VoidPlaceHolder, ValueT>> _value_;
+        std::exception_ptr                                                                       _exception_;
+        std::unique_ptr<_InternalContinuationHolderIfc<ValueT>>                                  _continuation_;
+        std::optional<Promise<ValueT>>                                                           _chained_promise_;
+        std::optional<std::function<void(std::exception_ptr)>>                                   _on_exception_;
 
         void _addRef() { ++_ref_count_; }
 
