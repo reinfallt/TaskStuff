@@ -1071,7 +1071,18 @@ namespace TaskStuff
                     persistent_state->_continuations_.clear();
 
                     persistent_state->_cv_value_.notify_all();
-                });
+                }).OnException([persistent_state = _persistent_state_](std::exception_ptr e)
+                    {
+                        std::unique_lock lock(persistent_state->_mtx_value_);
+                        persistent_state->_exception_ = e;
+                        
+                        for (auto& fn : persistent_state->_continuations_)
+                            fn->SetException(e);
+
+                        persistent_state->_continuations_.clear();
+
+                        persistent_state->_cv_value_.notify_all();
+                    });;
         }
 
         ValueT const& Get()
