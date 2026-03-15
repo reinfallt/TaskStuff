@@ -99,20 +99,27 @@ namespace TaskStuff
 
             virtual void Call() = 0;
             virtual void SetException(std::exception_ptr e) = 0;
+            virtual _InternalIfc* MoveTo(void* dest) = 0;
             virtual ~_InternalIfc() {}
         };
 
     private:
 
-        // TODO: Internal buffer to store the instance if it is small enough to avoid heap allocations
+        static const size_t INTERNAL_BUFFER_SIZE = 128;
+
         _InternalIfc* _internal_instance_;
+        std::array<uint8_t, INTERNAL_BUFFER_SIZE> _buf_;
 
         _InternalCallableHolder(_InternalCallableHolder const& other) = delete;
         _InternalCallableHolder& operator=(_InternalCallableHolder const& other) = delete;
 
         void _clear()
         {
-            delete _internal_instance_;
+            if (static_cast<void*>(_internal_instance_) == _buf_.data())
+                _internal_instance_->~_InternalIfc();
+            else
+                delete _internal_instance_;
+
             _internal_instance_ = nullptr;
         }
 
@@ -120,21 +127,44 @@ namespace TaskStuff
 
         _InternalCallableHolder()
             : _internal_instance_(nullptr)
+            , _buf_({})
         {
 
         }
 
         _InternalCallableHolder(_InternalCallableHolder&& other) noexcept
+            : _internal_instance_(nullptr)
+            , _buf_({})
         {
-            _internal_instance_ = other._internal_instance_;
-            other._internal_instance_ = nullptr;
+            if (static_cast<void*>(other._internal_instance_) == other._buf_.data())
+            {
+                other._internal_instance_->MoveTo(_buf_.data());
+                other._internal_instance_->~_InternalIfc();
+                other._internal_instance_ = nullptr;
+            }
+            else
+            {
+                _internal_instance_ = other._internal_instance_;
+                other._internal_instance_ = nullptr;
+            }
         }
 
         _InternalCallableHolder& operator=(_InternalCallableHolder&& other) noexcept
         {
             _clear();
-            _internal_instance_ = other._internal_instance_;
-            other._internal_instance_ = nullptr;
+
+            if (static_cast<void*>(other._internal_instance_) == other._buf_.data())
+            {
+                other._internal_instance_->MoveTo(_buf_.data());
+                other._internal_instance_->~_InternalIfc();
+                other._internal_instance_ = nullptr;
+            }
+            else
+            {
+                _internal_instance_ = other._internal_instance_;
+                other._internal_instance_ = nullptr;
+            }
+
             return *this;
         }
 
@@ -197,17 +227,16 @@ namespace TaskStuff
             { }
 
             _FunctionHolder(_FunctionHolder&& other)
+                : _fn_(std::move(other._fn_))
+                , _result_promise_(std::move(other._result_promise_))
             {
-                if constexpr (!std::is_same_v<result_type, void>)
+                if constexpr (!std::is_same_v<ArgumentT, void>)
                     _ArgumentHolder<ArgumentT>::_argument_value_ = std::move(other._argument_value_);
-
-                _fn_ = std::move(other._fn_);
-                _result_promise_ = std::move(other._result_promise_);
             }
 
             _FunctionHolder& operator=(_FunctionHolder&& other)
             {
-                if constexpr (!std::is_same_v<result_type, void>)
+                if constexpr (!std::is_same_v<ArgumentT, void>)
                     _ArgumentHolder<ArgumentT>::_argument_value_ = std::move(other._argument_value_);
 
                 _fn_ = std::move(other._fn_);
@@ -255,6 +284,12 @@ namespace TaskStuff
             {
                 _result_promise_.SetException(e);
             }
+
+            _InternalIfc* MoveTo(void* dest) override
+            {
+                // Placement new on buffer
+                return new (dest) _FunctionHolder<FnT, ArgumentT>(std::move(*this));
+            }
         };
 
         template <typename FnT, typename ArgumentT>
@@ -280,17 +315,16 @@ namespace TaskStuff
             }
 
             _ChainedFunctionHolder(_ChainedFunctionHolder&& other)
+                : _fn_(std::move(other._fn_))
+                , _result_promise_(std::move(other._result_promise_))
             {
-                if constexpr (!std::is_same_v<result_type, void>)
+                if constexpr (!std::is_same_v<ArgumentT, void>)
                     _ArgumentHolder<ArgumentT>::_argument_value_ = std::move(other._argument_value_);
-
-                _fn_ = std::move(other._fn_);
-                _result_promise_ = std::move(other._result_promise_);
             }
 
             _ChainedFunctionHolder& operator=(_ChainedFunctionHolder&& other)
             {
-                if constexpr (!std::is_same_v<result_type, void>)
+                if constexpr (!std::is_same_v<ArgumentT, void>)
                     _ArgumentHolder<ArgumentT>::_argument_value_ = std::move(other._argument_value_);
 
                 _fn_ = std::move(other._fn_);
@@ -323,13 +357,31 @@ namespace TaskStuff
             {
                 _result_promise_.SetException(e);
             }
+
+            _InternalIfc* MoveTo(void* dest) override
+            {
+                // Placement new on buffer
+                return new (dest) _ChainedFunctionHolder<FnT, ArgumentT>(std::move(*this));
+            }
         };
 
         template <typename FnT, typename ValueT>
         _FunctionHolder<FnT, ValueT>* Init(FnT fn, Promise<_internal_invoke_result_t<FnT, ValueT>> resultPromise)
         {
             _clear();
-            auto ret = new _FunctionHolder<FnT, ValueT>(std::move(fn), std::move(resultPromise));
+
+            _FunctionHolder<FnT, ValueT>* ret = nullptr;
+
+            // TODO: Check/handle aligments
+            if constexpr (sizeof(_FunctionHolder<FnT, ValueT>) <= INTERNAL_BUFFER_SIZE)
+            {
+                ret = new (_buf_.data()) _FunctionHolder<FnT, ValueT>(std::move(fn), std::move(resultPromise));
+            }
+            else
+            {
+                ret = new _FunctionHolder<FnT, ValueT>(std::move(fn), std::move(resultPromise));
+            }
+
             _internal_instance_ = ret;
             return ret;
         }
@@ -338,7 +390,19 @@ namespace TaskStuff
         _ChainedFunctionHolder<FnT, ValueT>* InitChained(FnT fn, Promise<typename _internal_invoke_result_t<FnT, ValueT>::value_type> resultPromise)
         {
             _clear();
-            auto ret = new _ChainedFunctionHolder<FnT, ValueT>(std::move(fn), std::move(resultPromise));
+
+            _ChainedFunctionHolder<FnT, ValueT>* ret = nullptr;
+
+            // TODO: Check/handle aligments
+            if constexpr (sizeof(_ChainedFunctionHolder<FnT, ValueT>) <= INTERNAL_BUFFER_SIZE)
+            {
+                ret = new (_buf_.data()) _ChainedFunctionHolder<FnT, ValueT>(std::move(fn), std::move(resultPromise));
+            }
+            else
+            {
+                ret = new _ChainedFunctionHolder<FnT, ValueT>(std::move(fn), std::move(resultPromise));
+            }
+
             _internal_instance_ = ret;
             return ret;
         }
