@@ -104,6 +104,7 @@ namespace TaskStuff
 
     private:
 
+        // TODO: Internal buffer to store the instance if it is small enough to avoid heap allocations
         _InternalIfc* _internal_instance_;
 
         _InternalCallableHolder(_InternalCallableHolder const& other) = delete;
