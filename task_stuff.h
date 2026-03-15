@@ -198,14 +198,18 @@ namespace TaskStuff
 
             _FunctionHolder(_FunctionHolder&& other)
             {
-                _ArgumentHolder<ArgumentT>::_argument_value_ = std::move(other._argument_value_);
+                if constexpr (!std::is_same_v<result_type, void>)
+                    _ArgumentHolder<ArgumentT>::_argument_value_ = std::move(other._argument_value_);
+
                 _fn_ = std::move(other._fn_);
                 _result_promise_ = std::move(other._result_promise_);
             }
 
             _FunctionHolder& operator=(_FunctionHolder&& other)
             {
-                _ArgumentHolder<ArgumentT>::_argument_value_ = std::move(other._argument_value_);
+                if constexpr (!std::is_same_v<result_type, void>)
+                    _ArgumentHolder<ArgumentT>::_argument_value_ = std::move(other._argument_value_);
+
                 _fn_ = std::move(other._fn_);
                 _result_promise_ = std::move(other._result_promise_);
 
