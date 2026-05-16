@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <condition_variable>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -1391,6 +1392,100 @@ namespace TaskStuff
             }
 
             return continuationFuture;
+        }
+    };
+
+    class ThreadPool
+    {
+
+    private:
+
+        std::mutex                          _queue_mtx_;
+        std::condition_variable             _queue_cv_;
+        std::deque<_InternalCallableHolder> _queue_;
+        bool                                _stopped_;
+
+        std::vector<std::thread>            _threads_;
+
+        std::optional<_InternalCallableHolder> _popWork()
+        {
+            std::unique_lock lock(_queue_mtx_);
+            while (_queue_.empty() && !_stopped_)
+            {
+                _queue_cv_.wait(lock);
+            }
+
+            if (_queue_.empty())
+                return std::nullopt;
+
+            auto ret = std::move(_queue_.front());
+            _queue_.pop_front();
+
+            return ret;
+        }
+
+        static void _threadProcess(ThreadPool* threadPool)
+        {
+            while (true)
+            {
+                auto work = threadPool->_popWork();
+                if (!work)
+                    return;
+
+                work->Call();
+            }
+        }
+
+    public:
+
+        ThreadPool()
+        {
+            
+        }
+
+        ~ThreadPool()
+        {
+            Stop();
+        }
+
+        void Start(int threadCount)
+        {
+            _threads_.resize(threadCount);
+
+            for (auto& t : _threads_)
+            {
+                t = std::thread(_threadProcess, this);
+            }
+        }
+
+        void Stop()
+        {
+            std::unique_lock lock(_queue_mtx_);
+            _stopped_ = true;
+            _queue_cv_.notify_all();
+            
+            for (auto& t : _threads_)
+            {
+                t.join();
+            }
+
+            _threads_.clear();
+        }
+
+        template <typename FnT>
+        Future<std::invoke_result_t<FnT>> PushWork(FnT fn)
+        {
+            Promise<std::invoke_result_t<FnT>> prom;
+            auto fut = prom.GetFuture();
+
+            _InternalCallableHolder holder;
+            holder.Init<FnT, void>(std::move(fn), std::move(prom));
+
+            std::unique_lock lock(_queue_mtx_);
+            _queue_.push_back(std::move(holder));
+            _queue_cv_.notify_one();
+
+            return fut;
         }
     };
 }
