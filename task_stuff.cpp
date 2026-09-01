@@ -20,7 +20,14 @@ namespace TaskStuff
         // If a continuation function is set, call it with the value
         if (_state_->_continuation_)
         {
-            _state_->_continuation_->Call();
+            if (_state_->_continuation_thread_pool_)
+            {
+                _state_->_continuation_thread_pool_->PushWork(std::move(*_state_->_continuation_));
+            }
+            else
+            {
+                _state_->_continuation_->Call();
+            }
         }
         else if (_state_->_chained_promise_)
         {

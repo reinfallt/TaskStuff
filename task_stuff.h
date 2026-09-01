@@ -442,6 +442,115 @@ namespace TaskStuff
         }
     };
 
+    class ThreadPool
+    {
+
+    private:
+
+        std::mutex                          _queue_mtx_;
+        std::condition_variable             _queue_cv_;
+        std::deque<_InternalCallableHolder> _queue_;
+        bool                                _stopped_;
+
+        std::vector<std::thread>            _threads_;
+
+        std::optional<_InternalCallableHolder> _popWork()
+        {
+            std::unique_lock lock(_queue_mtx_);
+            while (_queue_.empty() && !_stopped_)
+            {
+                _queue_cv_.wait(lock);
+            }
+
+            if (_queue_.empty())
+                return std::nullopt;
+
+            auto ret = std::move(_queue_.front());
+            _queue_.pop_front();
+
+            return ret;
+        }
+
+        static void _threadProcess(ThreadPool* threadPool)
+        {
+            while (true)
+            {
+                auto work = threadPool->_popWork();
+                if (!work)
+                    return;
+
+                work->Call();
+            }
+        }
+
+    public:
+
+        ThreadPool()
+            : _stopped_(false)
+        {
+        }
+
+        ~ThreadPool()
+        {
+            Stop();
+        }
+
+        void Start(int threadCount)
+        {
+            _threads_.resize(threadCount);
+
+            for (auto& t : _threads_)
+            {
+                t = std::thread(_threadProcess, this);
+            }
+        }
+
+        void Stop()
+        {
+            // Scope for lock
+            {
+                std::unique_lock lock(_queue_mtx_);
+                _stopped_ = true;
+            }
+
+            _queue_cv_.notify_all();
+
+            for (auto& t : _threads_)
+            {
+                t.join();
+            }
+
+            _threads_.clear();
+        }
+
+        void PushWork(_InternalCallableHolder holder)
+        {
+            std::unique_lock lock(_queue_mtx_);
+            _queue_.push_back(std::move(holder));
+            _queue_cv_.notify_one();
+        }
+
+        template <typename FnT>
+        Future<std::invoke_result_t<FnT>> PushWork(FnT fn)
+        {
+            Promise<std::invoke_result_t<FnT>> prom;
+            auto fut = prom.GetFuture();
+
+            _InternalCallableHolder holder;
+            holder.Init<FnT, void>(std::move(fn), std::move(prom));
+
+            // Scope for lock
+            {
+                std::unique_lock lock(_queue_mtx_);
+                _queue_.push_back(std::move(holder));
+            }
+
+            _queue_cv_.notify_one();
+
+            return fut;
+        }
+    };
+
     template <typename T>
     struct _is_future { static constexpr bool value = false; };
 
@@ -563,7 +672,7 @@ namespace TaskStuff
         template<typename FnT>
         std::enable_if_t<
             _is_future_v<_internal_invoke_result_t<FnT, ValueT>>,
-            _internal_invoke_result_t<FnT, ValueT>> Then(FnT fn)
+            _internal_invoke_result_t<FnT, ValueT>> Then(std::shared_ptr<ThreadPool> threadPool, FnT fn)
         {
             using resultType = typename _internal_invoke_result_t<FnT, ValueT>::value_type;
 
@@ -588,29 +697,53 @@ namespace TaskStuff
                 {
                     // If the promise has already been fulfilled,
                     // call the continuation function immediately
-                    try
-                    {
-                        if constexpr (std::is_same_v<ValueT, void>)
-                        {
-                            continuationFuture = fn();
-                        }
-                        else
-                        {
-                            continuationFuture = fn(std::move(*_state_->_value_));
-                        }
-                    }
-                    catch (...)
+
+                    if (threadPool)
                     {
                         Promise<resultType> continuationPromise;
                         continuationFuture = continuationPromise.GetFuture();
-                        continuationPromise.SetException(std::current_exception());
+
+                        _InternalCallableHolder continuationCallable;
+                        auto continuationArgumentHolder = continuationCallable.InitChained<FnT, ValueT>(
+                            std::move(fn), std::move(continuationPromise));
+
+                        if constexpr (!std::is_same_v<ValueT, void>)
+                        {
+                            continuationArgumentHolder->SetValue(std::move(*_state_->_value_));
+                        }
+
+                        threadPool->PushWork(std::move(continuationCallable));
+                    }
+                    else
+                    {
+                        try
+                        {
+                            if constexpr (std::is_same_v<ValueT, void>)
+                            {
+                                continuationFuture = fn();
+                            }
+                            else
+                            {
+                                continuationFuture = fn(std::move(*_state_->_value_));
+                            }
+                        }
+                        catch (...)
+                        {
+                            Promise<resultType> continuationPromise;
+                            continuationFuture = continuationPromise.GetFuture();
+                            continuationPromise.SetException(std::current_exception());
+                        }
                     }
                 }
                 else
                 {
                     Promise<resultType> continuationPromise;
                     continuationFuture = continuationPromise.GetFuture();
-                    _state_->_setChainedContinuation(std::move(fn), std::move(continuationPromise));
+
+                    _state_->_continuation_.emplace();
+                    _state_->_continuation_argument_holder_ = _state_->_continuation_->InitChained<FnT, ValueT>(
+                        std::move(fn), std::move(continuationPromise));
+                    _state_->_continuation_thread_pool_ = threadPool;
                 }
             }
 
@@ -623,7 +756,7 @@ namespace TaskStuff
         template<typename FnT>
         std::enable_if_t<
             _is_not_future_v<_internal_invoke_result_t<FnT, ValueT>>,
-            Future<_internal_invoke_result_t<FnT, ValueT>>> Then(FnT fn)
+            Future<_internal_invoke_result_t<FnT, ValueT>>> Then(std::shared_ptr<ThreadPool> threadPool, FnT fn)
         {
             using resultType = _internal_invoke_result_t<FnT, ValueT>;
 
@@ -647,45 +780,65 @@ namespace TaskStuff
                 {
                     // If the promise has already been fulfilled,
                     // call the continuation function immediately
-                    try
+
+                    if (threadPool)
                     {
-                        if constexpr (std::is_same_v<resultType, void>)
+                        _InternalCallableHolder continuationCallable;
+                        auto continuationArgumentHolder = continuationCallable.Init<FnT, ValueT>(
+                            std::move(fn), std::move(continuationPromise));
+
+                        if constexpr (!std::is_same_v<ValueT, void>)
                         {
-                            if constexpr (std::is_same_v<ValueT, void>)
-                            {
-                                fn();
-                            }
-                            else
-                            {
-                                fn(std::move(*_state_->_value_));
-                            }
-
-                            continuationPromise.SetDone();
+                            continuationArgumentHolder->SetValue(std::move(*_state_->_value_));
                         }
-                        else
-                        {
-                            resultType result;
 
-                            if constexpr (std::is_same_v<ValueT, void>)
-                            {
-                                result = fn();
-                            }
-                            else
-                            {
-                                result = fn(std::move(*_state_->_value_));
-                            }
-
-                            continuationPromise.SetValue(std::move(result));
-                        }
+                        threadPool->PushWork(std::move(continuationCallable));
                     }
-                    catch (...)
+                    else
                     {
-                        continuationPromise.SetException(std::current_exception());
+                        try
+                        {
+                            if constexpr (std::is_same_v<resultType, void>)
+                            {
+                                if constexpr (std::is_same_v<ValueT, void>)
+                                {
+                                    fn();
+                                }
+                                else
+                                {
+                                    fn(std::move(*_state_->_value_));
+                                }
+
+                                continuationPromise.SetDone();
+                            }
+                            else
+                            {
+                                resultType result;
+
+                                if constexpr (std::is_same_v<ValueT, void>)
+                                {
+                                    result = fn();
+                                }
+                                else
+                                {
+                                    result = fn(std::move(*_state_->_value_));
+                                }
+
+                                continuationPromise.SetValue(std::move(result));
+                            }
+                        }
+                        catch (...)
+                        {
+                            continuationPromise.SetException(std::current_exception());
+                        }
                     }
                 }
                 else
                 {
-                    _state_->_setContinuation(std::move(fn), std::move(continuationPromise));
+                    _state_->_continuation_.emplace();
+                    _state_->_continuation_argument_holder_ = _state_->_continuation_->Init<FnT, ValueT>(
+                        std::move(fn), std::move(continuationPromise));
+                    _state_->_continuation_thread_pool_ = threadPool;
                 }
             }
 
@@ -693,6 +846,12 @@ namespace TaskStuff
             _state_ = nullptr;
 
             return continuationFuture;
+        }
+
+        template<typename FnT>
+        auto Then(FnT fn)
+        {
+            return Then(nullptr, std::move(fn));
         }
     };
 
@@ -923,7 +1082,16 @@ namespace TaskStuff
             if (_InternalPromiseBase<ValueT>::_state_->_continuation_)
             {
                 _InternalPromiseBase<ValueT>::_state_->_continuation_argument_holder_->SetValue(std::move(value));
-                _InternalPromiseBase<ValueT>::_state_->_continuation_->Call();
+
+                if (_InternalPromiseBase<ValueT>::_state_->_continuation_thread_pool_)
+                {
+                    _InternalPromiseBase<ValueT>::_state_->_continuation_thread_pool_->PushWork(
+                        std::move(*_InternalPromiseBase<ValueT>::_state_->_continuation_));
+                }
+                else
+                {
+                    _InternalPromiseBase<ValueT>::_state_->_continuation_->Call();
+                }
             }
             else if (_InternalPromiseBase<ValueT>::_state_->_chained_promise_)
             {
@@ -988,6 +1156,7 @@ namespace TaskStuff
         std::exception_ptr                                                                       _exception_;
         std::optional<_InternalCallableHolder>                                                   _continuation_;
         _InternalCallableHolder::_ArgumentHolder<ValueT>*                                        _continuation_argument_holder_;
+        std::shared_ptr<ThreadPool>                                                              _continuation_thread_pool_;
         std::optional<Promise<ValueT>>                                                           _chained_promise_;
         std::optional<std::function<void(std::exception_ptr)>>                                   _on_exception_;
 
@@ -999,21 +1168,6 @@ namespace TaskStuff
             {
                 delete this;
             }
-        }
-
-
-        template <typename FnT>
-        void _setContinuation(FnT fn, Promise<_internal_invoke_result_t<FnT, ValueT>> prom)
-        {
-            _continuation_.emplace();
-            _continuation_argument_holder_ = _continuation_->Init<FnT, ValueT>(std::move(fn), std::move(prom));
-        }
-
-        template <typename FnT>
-        void _setChainedContinuation(FnT fn, Promise<typename _internal_invoke_result_t<FnT, ValueT>::value_type> prom)
-        {
-            _continuation_.emplace();
-            _continuation_argument_holder_ = _continuation_->InitChained<FnT, ValueT>(std::move(fn), std::move(prom));
         }
 
         friend class _InternalFutureBase<ValueT>;
@@ -1060,10 +1214,10 @@ namespace TaskStuff
         struct WhenAllContext
         {
             std::vector<ValueT> values;
-            std::atomic_int countdown;
+            std::atomic_size_t countdown;
             Promise<std::vector<ValueT>> promise_all;
             std::vector<std::exception_ptr> exceptions;
-            std::atomic_int exception_count;
+            std::atomic_size_t exception_count;
         };
 
         auto whenAllContext = std::make_shared<WhenAllContext>();
@@ -1137,10 +1291,10 @@ namespace TaskStuff
         {
             std::tuple<Future<ValuesT>...> tuple_futures;
             std::tuple<ValuesT...> values;
-            std::atomic_int countdown;
+            std::atomic_size_t countdown;
             Promise<std::tuple<ValuesT...>> promise_all;
             std::array<std::exception_ptr, sizeof...(ValuesT)> exceptions;
-            std::atomic_int exception_count;
+            std::atomic_size_t exception_count;
         };
 
         auto whenAllContext = std::make_shared<WhenAllContext>();
@@ -1213,27 +1367,42 @@ namespace TaskStuff
             std::exception_ptr            _exception_;
 
             std::vector<
-                std::pair<
+                std::tuple<
                     _InternalCallableHolder,
-                    _InternalCallableHolder::_ArgumentHolder<std::shared_ptr<ValueT const>>*>> _continuations_;
+                    _InternalCallableHolder::_ArgumentHolder<std::shared_ptr<ValueT const>>*,
+                    std::shared_ptr<ThreadPool>>> _continuations_;
         };
 
         std::shared_ptr<_persistentState> _persistent_state_;
 
         template <typename FnT>
-        void _addContinuation(FnT fn, Promise<std::invoke_result_t<FnT, std::shared_ptr<ValueT const>>> prom)
+        void _addContinuation(
+            std::shared_ptr<ThreadPool> threadPool,
+            FnT fn,
+            Promise<std::invoke_result_t<FnT, std::shared_ptr<ValueT const>>> prom)
         {
-            _persistent_state_->_continuations_.push_back({});
-            _persistent_state_->_continuations_.back().second =
-                _persistent_state_->_continuations_.back().first.template Init<FnT, std::shared_ptr<ValueT const>>(std::move(fn), std::move(prom));
+            auto& [continuationCallableHolder, continuationArgumentHolder, continuationThreadPool] =
+                _persistent_state_->_continuations_.emplace_back();
+            
+            continuationArgumentHolder = continuationCallableHolder.template Init<FnT, std::shared_ptr<ValueT const>>(
+                std::move(fn), std::move(prom));
+
+            continuationThreadPool = threadPool;
         }
 
         template <typename FnT>
-        void _addChainedContinuation(FnT fn, Promise<typename std::invoke_result_t<FnT, std::shared_ptr<ValueT const>>::value_type> prom)
+        void _addChainedContinuation(
+            std::shared_ptr<ThreadPool> threadPool,
+            FnT fn,
+            Promise<typename std::invoke_result_t<FnT, std::shared_ptr<ValueT const>>::value_type> prom)
         {
-            _persistent_state_->_continuations_.push_back({});
-            _persistent_state_->_continuations_.back().second =
-                _persistent_state_->_continuations_.back().first.template InitChained<FnT, std::shared_ptr<ValueT const>>(std::move(fn), std::move(prom));
+            auto& [continuationCallableHolder, continuationArgumentHolder, continuationThreadPool] =
+                _persistent_state_->_continuations_.emplace_back();
+
+            continuationArgumentHolder = continuationCallableHolder.template InitChained<FnT, std::shared_ptr<ValueT const>>(
+                std::move(fn), std::move(prom));
+
+            continuationThreadPool = threadPool;
         }
 
     public:
@@ -1252,10 +1421,13 @@ namespace TaskStuff
                     std::unique_lock lock(persistent_state->_mtx_value_);
                     persistent_state->_value_ = std::make_shared<ValueT>(std::move(value));
 
-                    for (auto& [fn, argHolder] : persistent_state->_continuations_)
+                    for (auto& [fn, argHolder, threadPool] : persistent_state->_continuations_)
                     {
                         argHolder->SetValue(persistent_state->_value_);
-                        fn.Call();
+                        if (threadPool)
+                            threadPool->PushWork(std::move(fn));
+                        else
+                            fn.Call();
                     }
 
                     persistent_state->_continuations_.clear();
@@ -1266,7 +1438,7 @@ namespace TaskStuff
                         std::unique_lock lock(persistent_state->_mtx_value_);
                         persistent_state->_exception_ = e;
                         
-                        for (auto& [fn, argHolder] : persistent_state->_continuations_)
+                        for (auto& [fn, argHolder, threadPool] : persistent_state->_continuations_)
                             fn.SetException(e);
 
                         persistent_state->_continuations_.clear();
@@ -1296,7 +1468,7 @@ namespace TaskStuff
         template<typename FnT>
         std::enable_if_t<
             _is_future_v<_internal_invoke_result_t<FnT, std::shared_ptr<ValueT const>>>,
-            _internal_invoke_result_t<FnT, std::shared_ptr<ValueT const>>> Then(FnT fn)
+            _internal_invoke_result_t<FnT, std::shared_ptr<ValueT const>>> Then(std::shared_ptr<ThreadPool> threadPool, FnT fn)
         {
             using resultType = typename _internal_invoke_result_t<FnT, std::shared_ptr<ValueT const>>::value_type;
 
@@ -1321,22 +1493,42 @@ namespace TaskStuff
                 {
                     // If the promise has already been fulfilled,
                     // call the continuation function immediately
-                    try
-                    {
-                        continuationFuture = fn(_persistent_state_->_value_);
-                    }
-                    catch (...)
+
+                    if (threadPool)
                     {
                         Promise<resultType> continuationPromise;
                         continuationFuture = continuationPromise.GetFuture();
-                        continuationPromise.SetException(std::current_exception());
+
+                        _InternalCallableHolder continuationCallable;
+                        auto continuationArgumentHolder = continuationCallable.InitChained<FnT, std::shared_ptr<ValueT const>>(
+                            std::move(fn), std::move(continuationPromise));
+
+                        if constexpr (!std::is_same_v<resultType, void>)
+                        {
+                            continuationArgumentHolder->SetValue(_persistent_state_->_value_);
+                        }
+
+                        threadPool->PushWork(std::move(continuationCallable));
+                    }
+                    else
+                    {
+                        try
+                        {
+                            continuationFuture = fn(_persistent_state_->_value_);
+                        }
+                        catch (...)
+                        {
+                            Promise<resultType> continuationPromise;
+                            continuationFuture = continuationPromise.GetFuture();
+                            continuationPromise.SetException(std::current_exception());
+                        }
                     }
                 }
                 else
                 {
                     Promise<resultType> continuationPromise;
                     continuationFuture = continuationPromise.GetFuture();
-                    _addChainedContinuation(std::move(fn), std::move(continuationPromise));
+                    _addChainedContinuation(threadPool, std::move(fn), std::move(continuationPromise));
                 }
             }
 
@@ -1346,7 +1538,7 @@ namespace TaskStuff
         template<typename FnT>
         std::enable_if_t<
             _is_not_future_v<_internal_invoke_result_t<FnT, std::shared_ptr<ValueT const>>>,
-            Future<_internal_invoke_result_t<FnT, std::shared_ptr<ValueT const>>>> Then(FnT fn)
+            Future<_internal_invoke_result_t<FnT, std::shared_ptr<ValueT const>>>> Then(std::shared_ptr<ThreadPool> threadPool, FnT fn)
         {
             using resultType = _internal_invoke_result_t<FnT, std::shared_ptr<ValueT const>>;
 
@@ -1355,10 +1547,10 @@ namespace TaskStuff
                 throw FutureError(FutureErrorCode::NoState, "Future has no state!");
             }
 
+            std::unique_lock lck(_persistent_state_->_mtx_value_);
+
             Promise<resultType> continuationPromise;
             auto continuationFuture = continuationPromise.GetFuture();
-
-            std::unique_lock lck(_persistent_state_->_mtx_value_);
 
             if (_persistent_state_->_exception_)
             {
@@ -1368,124 +1560,53 @@ namespace TaskStuff
             {
                 // If the promise has already been fulfilled,
                 // call the continuation function immediately
-                try
+
+                if (threadPool)
                 {
-                    if constexpr (std::is_same_v<resultType, void>)
+                    _InternalCallableHolder continuation;
+                    auto continuationArgumentHolder = continuation.Init<FnT, std::shared_ptr<ValueT const>>(
+                        std::move(fn), std::move(continuationPromise));
+
+                    if constexpr (!std::is_same_v<resultType, void>)
                     {
-                        fn(_persistent_state_->_value_);
-                        continuationPromise.SetDone();
+                        continuationArgumentHolder->SetValue(_persistent_state_->_value_);
                     }
-                    else
-                    {
-                        auto result = fn(_persistent_state_->_value_);
-                        continuationPromise.SetValue(std::move(result));
-                    }
+
+                    threadPool->PushWork(std::move(continuation));
                 }
-                catch (...)
+                else
                 {
-                    continuationPromise.SetException(std::current_exception());
+                    try
+                    {
+                        if constexpr (std::is_same_v<resultType, void>)
+                        {
+                            fn(_persistent_state_->_value_);
+                            continuationPromise.SetDone();
+                        }
+                        else
+                        {
+                            auto result = fn(_persistent_state_->_value_);
+                            continuationPromise.SetValue(std::move(result));
+                        }
+                    }
+                    catch (...)
+                    {
+                        continuationPromise.SetException(std::current_exception());
+                    }
                 }
             }
             else
             {
-                _addContinuation(std::move(fn), std::move(continuationPromise));
+                _addContinuation(threadPool, std::move(fn), std::move(continuationPromise));
             }
 
             return continuationFuture;
         }
-    };
 
-    class ThreadPool
-    {
-
-    private:
-
-        std::mutex                          _queue_mtx_;
-        std::condition_variable             _queue_cv_;
-        std::deque<_InternalCallableHolder> _queue_;
-        bool                                _stopped_;
-
-        std::vector<std::thread>            _threads_;
-
-        std::optional<_InternalCallableHolder> _popWork()
+        template<typename FnT>
+        auto Then(FnT fn)
         {
-            std::unique_lock lock(_queue_mtx_);
-            while (_queue_.empty() && !_stopped_)
-            {
-                _queue_cv_.wait(lock);
-            }
-
-            if (_queue_.empty())
-                return std::nullopt;
-
-            auto ret = std::move(_queue_.front());
-            _queue_.pop_front();
-
-            return ret;
-        }
-
-        static void _threadProcess(ThreadPool* threadPool)
-        {
-            while (true)
-            {
-                auto work = threadPool->_popWork();
-                if (!work)
-                    return;
-
-                work->Call();
-            }
-        }
-
-    public:
-
-        ThreadPool()
-        {
-            
-        }
-
-        ~ThreadPool()
-        {
-            Stop();
-        }
-
-        void Start(int threadCount)
-        {
-            _threads_.resize(threadCount);
-
-            for (auto& t : _threads_)
-            {
-                t = std::thread(_threadProcess, this);
-            }
-        }
-
-        void Stop()
-        {
-            std::unique_lock lock(_queue_mtx_);
-            _stopped_ = true;
-            _queue_cv_.notify_all();
-            
-            for (auto& t : _threads_)
-            {
-                t.join();
-            }
-
-            _threads_.clear();
-        }
-
-        template <typename FnT>
-        Future<std::invoke_result_t<FnT>> PushWork(FnT fn)
-        {
-            Promise<std::invoke_result_t<FnT>> prom;
-            auto fut = prom.GetFuture();
-
-            _InternalCallableHolder holder;
-            holder.Init<FnT, void>(std::move(fn), std::move(prom));
-
-            std::unique_lock lock(_queue_mtx_);
-            _queue_.push_back(std::move(holder));
-            _queue_cv_.notify_one();
-
-            return fut;
+            return Then(nullptr, std::move(fn));
         }
     };
 }
