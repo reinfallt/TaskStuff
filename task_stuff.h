@@ -1609,4 +1609,240 @@ namespace TaskStuff
             return Then(nullptr, std::move(fn));
         }
     };
+
+    enum class ChannelErrorCode : int32_t
+    {
+        None = 0,
+
+        ReaderAlreadyRetrieved = 1,
+        NoState = 2
+    };
+
+    class ChannelError : public std::runtime_error
+    {
+    private:
+
+        ChannelErrorCode _error_code_;
+
+    public:
+
+        ChannelError(ChannelErrorCode errorCode, const char* msg)
+            : std::runtime_error(msg)
+            , _error_code_(errorCode)
+        {
+        }
+
+        ChannelErrorCode ErrorCode() const
+        {
+            return _error_code_;
+        }
+    };
+
+    template <typename ValueT>
+    class AsyncChannelReader;
+
+    template <typename ValueT>
+    class AsyncChannelWriter;
+
+    template <typename ValueT>
+    class AsyncChannelState
+    {
+    private:
+
+        std::atomic_int _ref_count_ = 1;
+
+        std::mutex                                    _mtx_;
+        std::deque<ValueT>                            _queue_;
+        std::optional<Promise<std::optional<ValueT>>> _prom_;
+        bool                                          _done_ = false;
+
+        void _addRef() { ++_ref_count_; }
+
+        void _release()
+        {
+            if (0 == --_ref_count_)
+            {
+                delete this;
+            }
+        }
+
+        friend class AsyncChannelReader<ValueT>;
+        friend class AsyncChannelWriter<ValueT>;
+    };
+
+    template <typename ValueT>
+    class AsyncChannelReader
+    {
+    private:
+
+        AsyncChannelState<ValueT>* _state_;
+
+        AsyncChannelReader(AsyncChannelState<ValueT>* state)
+        {
+            _state_ = state;
+        }
+
+        friend class AsyncChannelWriter<ValueT>;
+
+    public:
+
+        AsyncChannelReader()
+            : _state_(nullptr)
+        { }
+
+        ~AsyncChannelReader()
+        {
+            if (_state_)
+                _state_->_release();
+        }
+
+        AsyncChannelReader(AsyncChannelReader const&) = delete;
+        AsyncChannelReader& operator=(AsyncChannelReader const&) = delete;
+
+        AsyncChannelReader(AsyncChannelReader&& other) noexcept
+        {
+            _state_ = other._state_;
+            other._state_ = nullptr;
+        }
+
+        AsyncChannelReader& operator=(AsyncChannelReader&& other) noexcept
+        {
+            if (_state_)
+                _state_->_release();
+
+            _state_ = other._state_;
+            other._state_ = nullptr;
+            return *this;
+        }
+
+        Future<std::optional<ValueT>> Read()
+        {
+            if (!_state_)
+            {
+                throw ChannelError(ChannelErrorCode::NoState, "Channel has no state!");
+            }
+
+            std::unique_lock lock(_state_->_mtx_);
+
+            // If there are values ready in the queue, directly return the first value
+            if (!_state_->_queue_.empty())
+            {
+                auto val = std::move(_state_->_queue_.front());
+                _state_->_queue_.pop_front();
+
+                return Future<std::optional<ValueT>>(std::move(val));
+            }
+
+            // If there are no more values
+            if (_state_->_done_)
+            {
+                return Future<std::optional<ValueT>>(std::nullopt);
+            }
+
+            // Otherwise set a promise in the state to be fulfilled later
+            return _state_->_prom_.emplace().GetFuture();
+        }
+    };
+
+    template <typename ValueT>
+    class AsyncChannelWriter
+    {
+    private:
+
+        AsyncChannelState<ValueT>* _state_;
+        bool _reader_retrieved_;
+
+        AsyncChannelWriter(AsyncChannelWriter const&) = delete;
+        AsyncChannelWriter& operator=(AsyncChannelWriter const&) = delete;
+
+        void _clear()
+        {
+            if (_state_)
+            {
+                // Scope for lock
+                {
+                    std::unique_lock lock(_state_->_mtx_);
+                    if (_state_->_prom_) // If there is a waiting promise it needs to be set to signal the end of the stream
+                    {
+                        _state_->_prom_->SetValue(std::nullopt);
+                        _state_->_prom_.reset();
+                    }
+
+                    _state_->_done_ = true;
+                }
+
+                _state_->_release();
+                _state_ = nullptr;
+            }
+        }
+
+    public:
+
+        AsyncChannelWriter()
+            : _state_(new AsyncChannelState<ValueT>())
+            , _reader_retrieved_(false)
+        {
+        }
+
+        AsyncChannelWriter(AsyncChannelWriter&& other)
+            : _state_(other._state_)
+            , _reader_retrieved_(other._reader_retrieved_)
+        {
+            other._state_ = nullptr;
+        }
+
+        AsyncChannelWriter& operator=(AsyncChannelWriter&& other)
+        {
+            _clear();
+
+            _state_ = other._state_;
+            other._state_ = nullptr;
+
+            return *this;
+        }
+
+        ~AsyncChannelWriter()
+        {
+            _clear();
+        }
+
+        void Write(ValueT val)
+        {
+            if (!_state_)
+            {
+                throw ChannelError(ChannelErrorCode::NoState, "Channel has no state!");
+            }
+
+            std::unique_lock lock(_state_->_mtx_);
+
+            // If there is a waiting promise, set its value
+            if (_state_->_prom_)
+            {
+                _state_->_prom_->SetValue(std::move(val));
+                _state_->_prom_.reset();
+            }
+            else // Otherwise push the value to the queue
+            {
+                _state_->_queue_.push_back(std::move(val));
+            }
+        }
+
+        AsyncChannelReader<ValueT> GetReader()
+        {
+            if (_reader_retrieved_)
+            {
+                throw ChannelError(ChannelErrorCode::ReaderAlreadyRetrieved, "Channel reader already retrieved!");
+            }
+
+            if (!_state_)
+            {
+                throw ChannelError(ChannelErrorCode::NoState, "Channel has no state!");
+            }
+
+            _reader_retrieved_ = true;
+            _state_->_addRef();
+
+            return AsyncChannelReader<ValueT>(_state_);
+        }
+    };
 }
