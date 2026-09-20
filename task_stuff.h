@@ -14,6 +14,128 @@
 
 namespace TaskStuff
 {
+    template <typename T>
+    class ReferenceCounted;
+
+    template <typename T>
+    ReferenceCounted<T> MakeReferenceCounted();
+
+    template <typename T>
+    class ReferenceCounted
+    {
+    private:
+
+        struct _internalHolder
+        {
+            std::atomic_int _ref_count_;
+            T               _obj_;
+
+            _internalHolder(T obj)
+                : _obj_(std::move(obj))
+                , _ref_count_(1)
+            {
+            }
+
+            _internalHolder()
+                : _obj_()
+                , _ref_count_(1)
+            {
+            }
+
+            _internalHolder(_internalHolder const&) = delete;
+            _internalHolder& operator=(_internalHolder const&) = delete;
+
+            void _addRef() { ++_ref_count_; }
+
+            void _release()
+            {
+                if (0 == --_ref_count_)
+                {
+                    delete this;
+                }
+            }
+        };
+
+        _internalHolder* _holder_;
+
+        ReferenceCounted(_internalHolder* holder)
+            : _holder_(holder)
+        {
+        }
+
+        friend ReferenceCounted<T> MakeReferenceCounted<T>();
+
+    public:
+
+        ReferenceCounted(T obj)
+            : _holder_(new _internalHolder(std::move(obj)))
+        { }
+
+        ReferenceCounted()
+            : _holder_(nullptr)
+        {
+        }
+
+        ~ReferenceCounted()
+        {
+            if (_holder_)
+                _holder_->_release();
+
+            _holder_ = nullptr;
+        }
+
+        ReferenceCounted(ReferenceCounted const& other)
+            : _holder_(other._holder_)
+        {
+            if (_holder_)
+                _holder_->_addRef();
+        }
+
+        ReferenceCounted& operator=(ReferenceCounted const& other)
+        {
+            if (_holder_)
+                _holder_->_release();
+
+            _holder_ = other._holder_;
+
+            if (_holder_)
+                _holder_->_addRef();
+
+            return *this;
+        }
+
+        T& operator*()
+        {
+            return _holder_->_obj_;
+        }
+
+        const T& operator*() const
+        {
+            return _holder_->_obj_;
+        }
+
+        T* operator->()
+        {
+            return &_holder_->_obj_;
+        }
+
+        const T* operator->() const
+        {
+            return &_holder_->_obj_;
+        }
+
+        operator bool() const
+        {
+            return !!_holder_;
+        }
+    };
+
+    template <typename T>
+    ReferenceCounted<T> MakeReferenceCounted()
+    {
+        return ReferenceCounted<T>(new ReferenceCounted<T>::_internalHolder());
+    }
+
     struct VoidPlaceHolder {};
 
     template <typename FnT, typename ArgumentT>
@@ -571,7 +693,7 @@ namespace TaskStuff
     {
     protected:
 
-        PromiseFutureState<ValueT>* _state_;
+        ReferenceCounted<PromiseFutureState<ValueT>> _state_;
 
         template <typename T>
         friend class PromiseFutureState;
@@ -607,15 +729,13 @@ namespace TaskStuff
                 }
             }
 
-            _state_->_release();
-            _state_ = nullptr;
+            _state_ = ReferenceCounted<PromiseFutureState<ValueT>>();
         }
 
         _InternalFutureBase(_InternalFutureBase const&) = delete;
         _InternalFutureBase& operator=(_InternalFutureBase const&) = delete;
 
         _InternalFutureBase() noexcept
-            : _state_(nullptr)
         { }
 
     public:
@@ -624,13 +744,11 @@ namespace TaskStuff
 
         ~_InternalFutureBase()
         {
-            if (_state_)
-                _state_->_release();
         }
 
         bool Valid() const
         {
-            return _state_ != nullptr;
+            return (bool)_state_;
         }
 
         ValueT Get()
@@ -659,8 +777,7 @@ namespace TaskStuff
                 val = std::move(*_state_->_value_);
             }
 
-            _state_->_release();
-            _state_ = nullptr;
+            _state_ = ReferenceCounted<PromiseFutureState<ValueT>>();
 
             if constexpr (!std::is_same_v<ValueT, void>)
                 return val;
@@ -747,8 +864,7 @@ namespace TaskStuff
                 }
             }
 
-            _state_->_release();
-            _state_ = nullptr;
+            _state_ = ReferenceCounted<PromiseFutureState<ValueT>>();
 
             return continuationFuture;
         }
@@ -842,8 +958,7 @@ namespace TaskStuff
                 }
             }
 
-            _state_->_release();
-            _state_ = nullptr;
+            _state_ = ReferenceCounted<PromiseFutureState<ValueT>>();
 
             return continuationFuture;
         }
@@ -860,7 +975,7 @@ namespace TaskStuff
     {
     private:
 
-        Future(PromiseFutureState<ValueT>* state)
+        Future(ReferenceCounted<PromiseFutureState<ValueT>> state)
         {
             _InternalFutureBase<ValueT>::_state_ = state;
         }
@@ -878,22 +993,19 @@ namespace TaskStuff
         Future(Future&& other) noexcept
         {
             _InternalFutureBase<ValueT>::_state_ = other._state_;
-            other._state_ = nullptr;
+            other._state_ = ReferenceCounted<PromiseFutureState<ValueT>>();
         }
 
         Future& operator=(Future&& other) noexcept
         {
-            if (_InternalFutureBase<ValueT>::_state_)
-                _InternalFutureBase<ValueT>::_state_->_release();
-
             _InternalFutureBase<ValueT>::_state_ = other._state_;
-            other._state_ = nullptr;
+            other._state_ = ReferenceCounted<PromiseFutureState<ValueT>>();
             return *this;
         }
 
         Future(ValueT value)
         {
-            _InternalFutureBase<ValueT>::_state_ = new PromiseFutureState<ValueT>();
+            _InternalFutureBase<ValueT>::_state_ = MakeReferenceCounted<PromiseFutureState<ValueT>>();
             _InternalFutureBase<ValueT>::_state_->_value_ = std::move(value);
         }
     };
@@ -903,7 +1015,7 @@ namespace TaskStuff
     {
     private:
 
-        Future(PromiseFutureState<void>* state)
+        Future(ReferenceCounted<PromiseFutureState<void>> state)
         {
             _state_ = state;
         }
@@ -921,7 +1033,7 @@ namespace TaskStuff
         Future(Future&& other) noexcept
         {
             _state_ = other._state_;
-            other._state_ = nullptr;
+            other._state_ = ReferenceCounted<PromiseFutureState<void>>();
         }
 
         Future& operator=(Future&& other) noexcept;
@@ -935,7 +1047,7 @@ namespace TaskStuff
     {
     protected:
 
-        PromiseFutureState<ValueT>* _state_;
+        ReferenceCounted<PromiseFutureState<ValueT>> _state_;
         bool _future_retrieved_;
         bool _value_set_;
 
@@ -951,13 +1063,12 @@ namespace TaskStuff
                     SetException(FutureError(FutureErrorCode::BrokenPromise, "Promise was broken!"));
                 }
 
-                _state_->_release();
-                _state_ = nullptr;
+                _state_ = ReferenceCounted<PromiseFutureState<ValueT>>();
             }
         }
 
         _InternalPromiseBase()
-            : _state_(new PromiseFutureState<ValueT>())
+            : _state_(MakeReferenceCounted<PromiseFutureState<ValueT>>())
             , _future_retrieved_(false)
             , _value_set_(false)
         {
@@ -983,7 +1094,6 @@ namespace TaskStuff
             }
 
             _future_retrieved_ = true;
-            _state_->_addRef();
 
             return Future<ValueT>(_state_);
         }
@@ -1043,7 +1153,7 @@ namespace TaskStuff
             _InternalPromiseBase<ValueT>::_future_retrieved_ = other._future_retrieved_;
             _InternalPromiseBase<ValueT>::_value_set_ = other._value_set_;
 
-            other._state_ = nullptr;
+            other._state_ = ReferenceCounted<PromiseFutureState<ValueT>>();
             other._future_retrieved_ = false;
             other._value_set_ = false;
         }
@@ -1056,7 +1166,7 @@ namespace TaskStuff
             _InternalPromiseBase<ValueT>::_future_retrieved_ = other._future_retrieved_;
             _InternalPromiseBase<ValueT>::_value_set_ = other._value_set_;
 
-            other._state_ = nullptr;
+            other._state_ = ReferenceCounted<PromiseFutureState<ValueT>>();
             other._future_retrieved_ = false;
             other._value_set_ = false;
 
@@ -1120,7 +1230,7 @@ namespace TaskStuff
             _future_retrieved_ = other._future_retrieved_;
             _value_set_ = other._value_set_;
 
-            other._state_ = nullptr;
+            other._state_ = ReferenceCounted<PromiseFutureState<void>>();
             other._future_retrieved_ = false;
             other._value_set_ = false;
         }
@@ -1133,7 +1243,7 @@ namespace TaskStuff
             _future_retrieved_ = other._future_retrieved_;
             _value_set_ = other._value_set_;
 
-            other._state_ = nullptr;
+            other._state_ = ReferenceCounted<PromiseFutureState<void>>();
             other._future_retrieved_ = false;
             other._value_set_ = false;
 
@@ -1148,8 +1258,6 @@ namespace TaskStuff
     {
     private:
 
-        std::atomic_int _ref_count_ = 1;
-
         std::mutex                                                                               _mtx_value_;
         std::condition_variable                                                                  _cv_value_;
         std::optional<std::conditional_t<std::is_same_v<ValueT, void>, VoidPlaceHolder, ValueT>> _value_;
@@ -1159,16 +1267,6 @@ namespace TaskStuff
         std::shared_ptr<ThreadPool>                                                              _continuation_thread_pool_;
         std::optional<Promise<ValueT>>                                                           _chained_promise_;
         std::optional<std::function<void(std::exception_ptr)>>                                   _on_exception_;
-
-        void _addRef() { ++_ref_count_; }
-
-        void _release()
-        {
-            if (0 == --_ref_count_)
-            {
-                delete this;
-            }
-        }
 
         friend class _InternalFutureBase<ValueT>;
         friend class _InternalPromiseBase<ValueT>;
@@ -1204,8 +1302,7 @@ namespace TaskStuff
             }
         }
 
-        _state_->_release();
-        _state_ = nullptr;
+        _state_ = ReferenceCounted<PromiseFutureState<void>>();
     }
 
     template <typename ValueT>
@@ -1220,7 +1317,7 @@ namespace TaskStuff
             std::atomic_size_t exception_count;
         };
 
-        auto whenAllContext = std::make_shared<WhenAllContext>();
+        auto whenAllContext = MakeReferenceCounted<WhenAllContext>();
         whenAllContext->values.resize(futures.size());
         whenAllContext->exceptions.resize(futures.size());
         whenAllContext->countdown = futures.size();
@@ -1228,7 +1325,7 @@ namespace TaskStuff
 
         for (size_t i = 0; i < futures.size(); ++i)
         {
-            futures[i].Then([whenAllContext = whenAllContext, idx = i](ValueT val)
+            futures[i].Then([whenAllContext = whenAllContext, idx = i] (ValueT val) mutable
                 {
                     whenAllContext->values[idx] = std::move(val);
                     if (0 == --whenAllContext->countdown) // The last underlying future to complete will set the value in the overall promise
@@ -1250,7 +1347,7 @@ namespace TaskStuff
                             whenAllContext->promise_all.SetValue(std::move(whenAllContext->values));
                         }
                     }
-                }).OnException([whenAllContext = whenAllContext, idx = i](std::exception_ptr e)
+                }).OnException([whenAllContext = whenAllContext, idx = i](std::exception_ptr e) mutable
                     {
                         whenAllContext->exceptions[idx] = e;
                         ++whenAllContext->exception_count;
@@ -1297,17 +1394,17 @@ namespace TaskStuff
             std::atomic_size_t exception_count;
         };
 
-        auto whenAllContext = std::make_shared<WhenAllContext>();
+        auto whenAllContext = MakeReferenceCounted<WhenAllContext>();
         whenAllContext->countdown = sizeof...(ValuesT);
         whenAllContext->tuple_futures = std::tuple<Future<ValuesT>...>{ std::move(futures)... };
         whenAllContext->exception_count = 0;
 
-        foreach_number<0, sizeof...(ValuesT)>([whenAllContext = whenAllContext](auto idx)
+        foreach_number<0, sizeof...(ValuesT)>([whenAllContext = whenAllContext](auto idx) mutable
             {
                 auto& current_future = std::get<idx>(whenAllContext->tuple_futures);
                 auto& current_value = std::get<idx>(whenAllContext->values);
 
-                current_future.Then([whenAllContext = whenAllContext, v = &current_value](auto val)
+                current_future.Then([whenAllContext = whenAllContext, v = &current_value](auto val) mutable
                     {
                         *v = std::move(val);
                         if (0 == --whenAllContext->countdown) // The last underlying future to complete will set the value in the overall promise
@@ -1329,7 +1426,7 @@ namespace TaskStuff
                                 whenAllContext->promise_all.SetValue(std::move(whenAllContext->values));
                             }
                         }
-                    }).OnException([whenAllContext = whenAllContext, idx = idx](std::exception_ptr e)
+                    }).OnException([whenAllContext = whenAllContext, idx = idx](std::exception_ptr e) mutable
                         {
                             whenAllContext->exceptions[idx] = e;
                             ++whenAllContext->exception_count;
@@ -1361,30 +1458,30 @@ namespace TaskStuff
 
         struct _persistentState
         {
-            std::mutex                    _mtx_value_;
-            std::condition_variable       _cv_value_;
-            std::shared_ptr<ValueT const> _value_;
-            std::exception_ptr            _exception_;
+            std::mutex                     _mtx_value_;
+            std::condition_variable        _cv_value_;
+            ReferenceCounted<ValueT const> _value_;
+            std::exception_ptr             _exception_;
 
             std::vector<
                 std::tuple<
                     _InternalCallableHolder,
-                    _InternalCallableHolder::_ArgumentHolder<std::shared_ptr<ValueT const>>*,
+                    _InternalCallableHolder::_ArgumentHolder<ReferenceCounted<ValueT const>>*,
                     std::shared_ptr<ThreadPool>>> _continuations_;
         };
 
-        std::shared_ptr<_persistentState> _persistent_state_;
+        ReferenceCounted<_persistentState> _persistent_state_;
 
         template <typename FnT>
         void _addContinuation(
             std::shared_ptr<ThreadPool> threadPool,
             FnT fn,
-            Promise<std::invoke_result_t<FnT, std::shared_ptr<ValueT const>>> prom)
+            Promise<std::invoke_result_t<FnT, ReferenceCounted<ValueT const>>> prom)
         {
             auto& [continuationCallableHolder, continuationArgumentHolder, continuationThreadPool] =
                 _persistent_state_->_continuations_.emplace_back();
             
-            continuationArgumentHolder = continuationCallableHolder.template Init<FnT, std::shared_ptr<ValueT const>>(
+            continuationArgumentHolder = continuationCallableHolder.template Init<FnT, ReferenceCounted<ValueT const>>(
                 std::move(fn), std::move(prom));
 
             continuationThreadPool = threadPool;
@@ -1394,12 +1491,12 @@ namespace TaskStuff
         void _addChainedContinuation(
             std::shared_ptr<ThreadPool> threadPool,
             FnT fn,
-            Promise<typename std::invoke_result_t<FnT, std::shared_ptr<ValueT const>>::value_type> prom)
+            Promise<typename std::invoke_result_t<FnT, ReferenceCounted<ValueT const>>::value_type> prom)
         {
             auto& [continuationCallableHolder, continuationArgumentHolder, continuationThreadPool] =
                 _persistent_state_->_continuations_.emplace_back();
 
-            continuationArgumentHolder = continuationCallableHolder.template InitChained<FnT, std::shared_ptr<ValueT const>>(
+            continuationArgumentHolder = continuationCallableHolder.template InitChained<FnT, ReferenceCounted<ValueT const>>(
                 std::move(fn), std::move(prom));
 
             continuationThreadPool = threadPool;
@@ -1412,14 +1509,14 @@ namespace TaskStuff
         { }
 
         PersistentFuture(Future<ValueT> fut)
-            : _persistent_state_(std::make_shared<_persistentState>())
+            : _persistent_state_()
         {
             // Set a "proxy" continuation function on the base future that will set
             // the value in the persistent state and call all continuation functions.
-            fut.Then([persistent_state = _persistent_state_](ValueT value)
+            fut.Then([persistent_state = _persistent_state_](ValueT value) mutable
                 {
                     std::unique_lock lock(persistent_state->_mtx_value_);
-                    persistent_state->_value_ = std::make_shared<ValueT>(std::move(value));
+                    persistent_state->_value_ = ReferenceCounted<ValueT const>(std::move(value));
 
                     for (auto& [fn, argHolder, threadPool] : persistent_state->_continuations_)
                     {
@@ -1433,7 +1530,7 @@ namespace TaskStuff
                     persistent_state->_continuations_.clear();
 
                     persistent_state->_cv_value_.notify_all();
-                }).OnException([persistent_state = _persistent_state_](std::exception_ptr e)
+                }).OnException([persistent_state = _persistent_state_](std::exception_ptr e) mutable
                     {
                         std::unique_lock lock(persistent_state->_mtx_value_);
                         persistent_state->_exception_ = e;
@@ -1467,10 +1564,10 @@ namespace TaskStuff
         // This specialization causes the Future on the top level to still be a simple Future<int> that can be awaited.
         template<typename FnT>
         std::enable_if_t<
-            _is_future_v<_internal_invoke_result_t<FnT, std::shared_ptr<ValueT const>>>,
-            _internal_invoke_result_t<FnT, std::shared_ptr<ValueT const>>> Then(std::shared_ptr<ThreadPool> threadPool, FnT fn)
+            _is_future_v<_internal_invoke_result_t<FnT, ReferenceCounted<ValueT const>>>,
+            _internal_invoke_result_t<FnT, ReferenceCounted<ValueT const>>> Then(std::shared_ptr<ThreadPool> threadPool, FnT fn)
         {
-            using resultType = typename _internal_invoke_result_t<FnT, std::shared_ptr<ValueT const>>::value_type;
+            using resultType = typename _internal_invoke_result_t<FnT, ReferenceCounted<ValueT const>>::value_type;
 
             if (!_persistent_state_)
             {
@@ -1500,7 +1597,7 @@ namespace TaskStuff
                         continuationFuture = continuationPromise.GetFuture();
 
                         _InternalCallableHolder continuationCallable;
-                        auto continuationArgumentHolder = continuationCallable.InitChained<FnT, std::shared_ptr<ValueT const>>(
+                        auto continuationArgumentHolder = continuationCallable.InitChained<FnT, ReferenceCounted<ValueT const>>(
                             std::move(fn), std::move(continuationPromise));
 
                         if constexpr (!std::is_same_v<resultType, void>)
@@ -1537,10 +1634,10 @@ namespace TaskStuff
 
         template<typename FnT>
         std::enable_if_t<
-            _is_not_future_v<_internal_invoke_result_t<FnT, std::shared_ptr<ValueT const>>>,
-            Future<_internal_invoke_result_t<FnT, std::shared_ptr<ValueT const>>>> Then(std::shared_ptr<ThreadPool> threadPool, FnT fn)
+            _is_not_future_v<_internal_invoke_result_t<FnT, ReferenceCounted<ValueT const>>>,
+            Future<_internal_invoke_result_t<FnT, ReferenceCounted<ValueT const>>>> Then(std::shared_ptr<ThreadPool> threadPool, FnT fn)
         {
-            using resultType = _internal_invoke_result_t<FnT, std::shared_ptr<ValueT const>>;
+            using resultType = _internal_invoke_result_t<FnT, ReferenceCounted<ValueT const>>;
 
             if (!_persistent_state_)
             {
@@ -1564,7 +1661,7 @@ namespace TaskStuff
                 if (threadPool)
                 {
                     _InternalCallableHolder continuation;
-                    auto continuationArgumentHolder = continuation.Init<FnT, std::shared_ptr<ValueT const>>(
+                    auto continuationArgumentHolder = continuation.Init<FnT, ReferenceCounted<ValueT const>>(
                         std::move(fn), std::move(continuationPromise));
 
                     if constexpr (!std::is_same_v<resultType, void>)
@@ -1649,22 +1746,10 @@ namespace TaskStuff
     {
     private:
 
-        std::atomic_int _ref_count_ = 1;
-
         std::mutex                                    _mtx_;
         std::deque<ValueT>                            _queue_;
         std::optional<Promise<std::optional<ValueT>>> _prom_;
         bool                                          _done_ = false;
-
-        void _addRef() { ++_ref_count_; }
-
-        void _release()
-        {
-            if (0 == --_ref_count_)
-            {
-                delete this;
-            }
-        }
 
         friend class AsyncChannelReader<ValueT>;
         friend class AsyncChannelWriter<ValueT>;
@@ -1675,11 +1760,11 @@ namespace TaskStuff
     {
     private:
 
-        AsyncChannelState<ValueT>* _state_;
+        ReferenceCounted<AsyncChannelState<ValueT>> _state_;
 
-        AsyncChannelReader(AsyncChannelState<ValueT>* state)
+        AsyncChannelReader(ReferenceCounted<AsyncChannelState<ValueT>> state)
+            : _state_(state)
         {
-            _state_ = state;
         }
 
         friend class AsyncChannelWriter<ValueT>;
@@ -1687,13 +1772,11 @@ namespace TaskStuff
     public:
 
         AsyncChannelReader()
-            : _state_(nullptr)
         { }
 
         ~AsyncChannelReader()
         {
-            if (_state_)
-                _state_->_release();
+            _state_ = ReferenceCounted<AsyncChannelState<ValueT>>();
         }
 
         AsyncChannelReader(AsyncChannelReader const&) = delete;
@@ -1702,16 +1785,13 @@ namespace TaskStuff
         AsyncChannelReader(AsyncChannelReader&& other) noexcept
         {
             _state_ = other._state_;
-            other._state_ = nullptr;
+            other._state_ = ReferenceCounted<AsyncChannelState<ValueT>>();
         }
 
         AsyncChannelReader& operator=(AsyncChannelReader&& other) noexcept
         {
-            if (_state_)
-                _state_->_release();
-
             _state_ = other._state_;
-            other._state_ = nullptr;
+            other._state_ = ReferenceCounted<AsyncChannelState<ValueT>>();
             return *this;
         }
 
@@ -1749,7 +1829,7 @@ namespace TaskStuff
     {
     private:
 
-        AsyncChannelState<ValueT>* _state_;
+        ReferenceCounted<AsyncChannelState<ValueT>> _state_;
         bool _reader_retrieved_;
 
         AsyncChannelWriter(AsyncChannelWriter const&) = delete;
@@ -1771,15 +1851,14 @@ namespace TaskStuff
                     _state_->_done_ = true;
                 }
 
-                _state_->_release();
-                _state_ = nullptr;
+                _state_ = ReferenceCounted<AsyncChannelState<ValueT>>();
             }
         }
 
     public:
 
         AsyncChannelWriter()
-            : _state_(new AsyncChannelState<ValueT>())
+            : _state_(AsyncChannelState<ValueT>())
             , _reader_retrieved_(false)
         {
         }
@@ -1788,7 +1867,7 @@ namespace TaskStuff
             : _state_(other._state_)
             , _reader_retrieved_(other._reader_retrieved_)
         {
-            other._state_ = nullptr;
+            other._state_ = ReferenceCounted<AsyncChannelState<ValueT>>();
         }
 
         AsyncChannelWriter& operator=(AsyncChannelWriter&& other)
@@ -1796,7 +1875,7 @@ namespace TaskStuff
             _clear();
 
             _state_ = other._state_;
-            other._state_ = nullptr;
+            other._state_ = ReferenceCounted<AsyncChannelState<ValueT>>();
 
             return *this;
         }
@@ -1840,7 +1919,6 @@ namespace TaskStuff
             }
 
             _reader_retrieved_ = true;
-            _state_->_addRef();
 
             return AsyncChannelReader<ValueT>(_state_);
         }

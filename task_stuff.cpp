@@ -42,11 +42,8 @@ namespace TaskStuff
 
     Future<void>& Future<void>::operator=(Future<void>&& other) noexcept
     {
-        if (_state_)
-            _state_->_release();
-
         _state_ = other._state_;
-        other._state_ = nullptr;
+        other._state_ = ReferenceCounted<PromiseFutureState<void>>();
         return *this;
     }
 }
