@@ -1858,7 +1858,7 @@ namespace TaskStuff
     public:
 
         AsyncChannelWriter()
-            : _state_(AsyncChannelState<ValueT>())
+            : _state_(MakeReferenceCounted<AsyncChannelState<ValueT>>())
             , _reader_retrieved_(false)
         {
         }
